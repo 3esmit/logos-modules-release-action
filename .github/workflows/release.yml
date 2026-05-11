@@ -1,0 +1,303 @@
+name: Release module
+
+# Reusable workflow that publishes a single Logos module as a per-module
+# GitHub release plus a JSON sidecar that the rebuild-index workflow
+# aggregates into the rolling `index` release.
+#
+# Source of truth for the module's name+version is `<module_path>/metadata.json`.
+# There is intentionally no `module_name` / `version` input here; the action
+# extracts both from the built artifact via `lgx manifest --json` and
+# cross-checks them against `metadata.json` to fail loudly on drift.
+#
+# Signing is opt-in via `signing_mode`:
+#   - none      (default) — produce an unsigned `.lgx`.
+#   - inline    — `lgx sign` inside the workflow using the `signing_key` secret.
+#   - external  — invoke `signing_command` with `LGX_PATH` pointing at the
+#                 freshly-built unsigned `.lgx`. The command is responsible
+#                 for producing a signed `.lgx` (either by replacing the
+#                 file in-place or by writing it to `$LGX_SIGNED_OUT`).
+#                 Suitable for HSM, Jenkins, hardware-token, and other
+#                 signing rigs that must not see the key.
+
+on:
+  workflow_call:
+    inputs:
+      module_path:
+        description: "Path to the module source within the caller repo."
+        type: string
+        default: "."
+      variants:
+        description: "Comma-separated list of variants to build."
+        type: string
+        # darwin-arm64 + linux-amd64 + linux-arm64 covers every GitHub-
+        # hosted runner family currently available for public repos.
+        # macOS Intel and Windows are not in the default set — callers
+        # that need them can pass an explicit `variants:` list.
+        default: "darwin-arm64,linux-amd64,linux-arm64"
+      signing_mode:
+        description: "One of: none, inline, external."
+        type: string
+        default: "none"
+      signing_command:
+        description: |
+          Shell command (signing_mode=external). Receives `LGX_PATH` env
+          var pointing at the unsigned `.lgx`. Must, on success, either
+          modify $LGX_PATH in place or write the signed package to
+          $LGX_SIGNED_OUT (this workflow sets it before invoking).
+        type: string
+        default: ""
+      signing_command_image:
+        description: |
+          Docker image to execute `signing_command` in (signing_mode=external).
+          Empty means run on the runner directly.
+        type: string
+        default: ""
+    secrets:
+      signing_key:
+        description: |
+          JWK-format Ed25519 secret key. Required iff signing_mode == inline.
+        required: false
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      module_name: ${{ steps.meta.outputs.module_name }}
+      version:     ${{ steps.meta.outputs.version }}
+      variants:    ${{ steps.meta.outputs.variants }}
+    steps:
+      # fetch-depth: 0 produces a full (non-shallow) clone. Required
+      # because module flake.nix files use `git+file://…` flake inputs
+      # pointing at the submodule, and Nix rejects shallow flake
+      # inputs unless `shallow = true;` is specified in the URL —
+      # which we can't control from inside the action. Cloning fully
+      # is the path of least surprise.
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+      - id: meta
+        name: Read metadata.json
+        shell: bash
+        run: |
+          set -euo pipefail
+          mpath="${{ inputs.module_path }}"
+          if [[ ! -f "$mpath/metadata.json" ]]; then
+            echo "::error::no metadata.json at $mpath"; exit 1
+          fi
+          name=$(jq -r '.name'    "$mpath/metadata.json")
+          ver=$(jq  -r '.version' "$mpath/metadata.json")
+          if [[ -z "$name" || "$name" == "null" ]]; then echo "::error::metadata.json missing name"; exit 1; fi
+          if [[ -z "$ver"  || "$ver"  == "null" ]]; then echo "::error::metadata.json missing version"; exit 1; fi
+          echo "module_name=$name" >> "$GITHUB_OUTPUT"
+          echo "version=$ver"      >> "$GITHUB_OUTPUT"
+          # JSON array form for matrix consumption.
+          IFS=',' read -ra V <<< "${{ inputs.variants }}"
+          arr="["
+          for v in "${V[@]}"; do arr+="\"${v//[[:space:]]/}\","; done
+          arr="${arr%,}]"
+          echo "variants=$arr" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: setup
+    strategy:
+      # Not every module's flake.nix defines outputs for every variant
+      # — e.g. some modules pre-date the linux-arm64 default and only
+      # expose darwin-arm64 + linux-amd64. Let those variants fail
+      # individually without aborting the run; the release job below
+      # merges whatever variants succeeded and surfaces a partial
+      # release rather than dropping the whole module.
+      fail-fast: false
+      matrix:
+        variant: ${{ fromJson(needs.setup.outputs.variants) }}
+        include:
+          - variant: darwin-arm64
+            runs-on: macos-latest          # Apple silicon
+          - variant: linux-amd64
+            runs-on: ubuntu-latest         # x86_64
+          - variant: linux-arm64
+            runs-on: ubuntu-24.04-arm      # Public GitHub arm64 runner (GA'd 2025)
+    runs-on: ${{ matrix.runs-on }}
+    steps:
+      # Same full-clone rationale as the setup job: Nix flake inputs
+      # that reference the local working tree refuse to consume a
+      # shallow clone.
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+      # DeterminateSystems' installer rather than cachix/install-nix-action@v25,
+      # which trips over the macos-latest runner's pre-provisioned _nixbld*
+      # users (`<dscl_cmd> DS Error: -14135 (eDSRecordAlreadyExists)`).
+      # DS detects pre-existing Nix installs and skips the user-creation
+      # step gracefully on all current GitHub runners (Apple silicon
+      # macOS, ubuntu-latest, ubuntu-24.04-arm).
+      - uses: DeterminateSystems/nix-installer-action@main
+        with:
+          extra-conf: |
+            experimental-features = nix-command flakes
+      - name: Build .lgx (${{ matrix.variant }})
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${{ inputs.module_path }}"
+          nix build .#lgx --print-out-paths --no-link > .lgx-out
+          # The lgx build output is a single .lgx file in the result dir.
+          out=$(cat .lgx-out)
+          lgx=$(find "$out" -maxdepth 2 -name '*.lgx' | head -n1)
+          if [[ -z "$lgx" ]]; then echo "::error::nix build produced no .lgx"; exit 1; fi
+          mkdir -p "$GITHUB_WORKSPACE/_artifacts"
+          cp "$lgx" "$GITHUB_WORKSPACE/_artifacts/${{ needs.setup.outputs.module_name }}-${{ matrix.variant }}.lgx"
+      # Artifact name MUST include the module name. The umbrella
+      # `Release all modules` workflow fans out a matrix over every
+      # submodule, and all 13 module pipelines run inside one shared
+      # workflow run — `actions/upload-artifact@v4` rejects two uploads
+      # with the same name in the same run (HTTP 409 Conflict).
+      # `<module>-<variant>` keeps names unique across the umbrella
+      # while the per-module standalone workflow still produces a
+      # well-formed artifact set.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lgx-${{ needs.setup.outputs.module_name }}-${{ matrix.variant }}
+          path: _artifacts/*.lgx
+
+  release:
+    needs: [setup, build]
+    # `if: always()` lets us release when SOME variants succeeded but
+    # others failed (e.g. linux-arm64 missing from a module's flake.nix).
+    # We still gate on `setup` having produced module_name + version —
+    # without those the rest of the job has nothing to do. The merge
+    # step below errors when zero variants downloaded, so a total
+    # build wipeout still fails the run loudly.
+    if: always() && needs.setup.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      # Same DeterminateSystems-installer rationale as the build job —
+      # avoids the macOS runner's eDSRecordAlreadyExists issue.
+      - uses: DeterminateSystems/nix-installer-action@main
+        with:
+          extra-conf: |
+            experimental-features = nix-command flakes
+      # Pattern must scope to THIS module only — the umbrella workflow
+      # run hosts uploads from every other module too (lgx-<other>-*).
+      # Without the module-name prefix the merge step would pull all
+      # of them and `lgx merge` would fail on the mismatched manifests.
+      - uses: actions/download-artifact@v4
+        with:
+          path: _per-variant
+          pattern: lgx-${{ needs.setup.outputs.module_name }}-*
+
+      - name: Merge per-variant .lgx files
+        id: merge
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s globstar
+          mapfile -t variants < <(printf '%s\n' _per-variant/lgx-*/*.lgx)
+          if [[ ${#variants[@]} -eq 0 ]]; then echo "::error::no variants downloaded"; exit 1; fi
+          name="${{ needs.setup.outputs.module_name }}"
+          ver="${{ needs.setup.outputs.version }}"
+          out="$GITHUB_WORKSPACE/${name}-${ver}.lgx"
+          nix run nixpkgs#lgx -- merge "${variants[@]}" -o "$out" -y
+          echo "lgx=$out" >> "$GITHUB_OUTPUT"
+
+      - name: Verify merged package (pre-sign)
+        run: nix run nixpkgs#lgx -- verify "${{ steps.merge.outputs.lgx }}"
+
+      - name: Sign (inline)
+        if: inputs.signing_mode == 'inline'
+        env:
+          SIGNING_KEY: ${{ secrets.signing_key }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${SIGNING_KEY:-}" ]]; then
+            echo "::error::signing_mode=inline but signing_key secret is empty"; exit 1
+          fi
+          tmpd=$(mktemp -d)
+          printf '%s' "$SIGNING_KEY" > "$tmpd/release.jwk"
+          chmod 600 "$tmpd/release.jwk"
+          nix run nixpkgs#lgx -- sign "${{ steps.merge.outputs.lgx }}" --key release --keys-dir "$tmpd"
+          nix run nixpkgs#lgx -- verify "${{ steps.merge.outputs.lgx }}"
+
+      - name: Sign (external)
+        if: inputs.signing_mode == 'external'
+        shell: bash
+        env:
+          LGX_PATH: ${{ steps.merge.outputs.lgx }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${{ inputs.signing_command }}" ]]; then
+            echo "::error::signing_mode=external requires signing_command"; exit 1
+          fi
+          export LGX_SIGNED_OUT="${LGX_PATH%.lgx}.signed.lgx"
+          if [[ -n "${{ inputs.signing_command_image }}" ]]; then
+            docker run --rm \
+              -v "$PWD:/work" -w /work \
+              -e LGX_PATH="$LGX_PATH" -e LGX_SIGNED_OUT="$LGX_SIGNED_OUT" \
+              "${{ inputs.signing_command_image }}" \
+              bash -c '${{ inputs.signing_command }}'
+          else
+            bash -c '${{ inputs.signing_command }}'
+          fi
+          if [[ -f "$LGX_SIGNED_OUT" ]]; then mv "$LGX_SIGNED_OUT" "$LGX_PATH"; fi
+          nix run nixpkgs#lgx -- verify "$LGX_PATH"
+
+      - name: Extract manifest & build sidecar JSON
+        id: sidecar
+        shell: bash
+        run: |
+          set -euo pipefail
+          lgx="${{ steps.merge.outputs.lgx }}"
+          manifest=$(nix run nixpkgs#lgx -- manifest "$lgx" --json)
+          mname=$(jq -r .name    <<<"$manifest")
+          mver=$(jq  -r .version <<<"$manifest")
+          mroot=$(jq -r '.hashes.root // ""' <<<"$manifest")
+          if [[ "$mname" != "${{ needs.setup.outputs.module_name }}" || "$mver" != "${{ needs.setup.outputs.version }}" ]]; then
+            echo "::error::manifest mismatch — metadata.json says ${{ needs.setup.outputs.module_name }}@${{ needs.setup.outputs.version }} but .lgx has $mname@$mver"
+            exit 1
+          fi
+          sha=$(sha256sum "$lgx" | awk '{print $1}')
+          size=$(stat -c%s "$lgx" 2>/dev/null || stat -f%z "$lgx")
+          sig=""
+          if unzip -p "$lgx" manifest.sig 2>/dev/null | head -c1 >/dev/null; then
+            # `.lgx` is gzip-tar, not zip; use tar to peek instead.
+            sig=$(tar -O -xzf "$lgx" manifest.sig 2>/dev/null || true)
+          fi
+          jq -n \
+             --arg releaseTag "${{ needs.setup.outputs.module_name }}-v${{ needs.setup.outputs.version }}" \
+             --arg releasedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+             --arg sha "$sha" --argjson size "$size" \
+             --arg rootHash "$mroot" \
+             --argjson manifest "$manifest" \
+             --arg signature "$sig" \
+             '{
+                publisherRef: $releaseTag,
+                releasedAt:   $releasedAt,
+                sha256:       $sha,
+                size:         $size,
+                rootHash:     $rootHash,
+                manifest:     $manifest
+              } + (if ($signature | length) > 0
+                   then { signature: ($signature | fromjson) }
+                   else {} end)' > sidecar.json
+          echo "lgx=$lgx" >> "$GITHUB_OUTPUT"
+          echo "sidecar=$PWD/sidecar.json" >> "$GITHUB_OUTPUT"
+
+      - name: Create / update GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.setup.outputs.module_name }}-v${{ needs.setup.outputs.version }}
+          name:     ${{ needs.setup.outputs.module_name }} v${{ needs.setup.outputs.version }}
+          files: |
+            ${{ steps.sidecar.outputs.lgx }}
+            ${{ steps.sidecar.outputs.sidecar }}
+
+      - name: Trigger rebuild-index workflow
+        if: success()
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          event-type: rebuild-index

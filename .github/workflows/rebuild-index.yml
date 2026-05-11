@@ -1,0 +1,45 @@
+name: Rebuild index.json
+
+# Reusable workflow that aggregates every per-module release into a single
+# rolling `index.json` and uploads it to the `index` release tag.
+#
+# Triggered automatically by the `release.yml` workflow after a successful
+# publication. Can also be invoked manually (workflow_dispatch) or on a
+# schedule (catch-up after a missed dispatch).
+
+on:
+  workflow_call:
+  workflow_dispatch:
+  repository_dispatch:
+    types: [rebuild-index]
+  schedule:
+    - cron: '17 */6 * * *'   # every six hours; catches missed dispatches
+
+jobs:
+  rebuild:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build index.json
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          python3 scripts/build_index.py \
+            --owner "${{ github.repository_owner }}" \
+            --repo  "${{ github.event.repository.name }}" \
+            --out   index.json
+          # Show a small summary so the workflow log is useful at-a-glance.
+          jq '{ schemaVersion, repositoryName, packageCount: (.packages | length) }' index.json
+
+      - name: Replace the `index` release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: index
+          name:     Catalog index (auto-updated)
+          body:     "Auto-generated index of every per-module release in this repository."
+          files:    index.json
+          # `softprops/action-gh-release` updates existing releases with the
+          # same tag, replacing assets in-place. No manual delete needed.
