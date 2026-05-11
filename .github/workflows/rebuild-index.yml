@@ -1,0 +1,64 @@
+name: Rebuild index.json
+
+# Reusable workflow that aggregates every per-module release into a single
+# rolling `index.json` and uploads it to the `index` release tag.
+#
+# Triggered automatically by the `release.yml` workflow after a successful
+# publication. Can also be invoked manually (workflow_dispatch) or on a
+# schedule (catch-up after a missed dispatch).
+
+on:
+  workflow_call:
+  workflow_dispatch:
+  repository_dispatch:
+    types: [rebuild-index]
+  schedule:
+    - cron: '17 */6 * * *'   # every six hours; catches missed dispatches
+
+jobs:
+  rebuild:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      # The caller-repo checkout isn't strictly necessary (the index
+      # builder talks to the GitHub API, doesn't read the working
+      # tree). We do it anyway because softprops/action-gh-release
+      # is friendlier when invoked from inside the caller's checkout.
+      - uses: actions/checkout@v4
+
+      # `scripts/build_index.py` lives in THIS action repo, not in
+      # the caller. Reusable workflows don't get an automatic
+      # checkout of the action repo (no equivalent of `github.action_path`
+      # / `github.action_ref` exists for reusable workflows — the
+      # context inside a called workflow refers to the CALLER's repo).
+      # We pin to `v1`, which matches the tag the caller workflow used
+      # to invoke us; advance both the v1 tag and the script in lockstep.
+      - name: Checkout release-action repo (for build_index.py)
+        uses: actions/checkout@v4
+        with:
+          repository: logos-co/logos-modules-release-action
+          ref: v1
+          path: _action-tools
+
+      - name: Build index.json
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          python3 _action-tools/scripts/build_index.py \
+            --owner "${{ github.repository_owner }}" \
+            --repo  "${{ github.event.repository.name }}" \
+            --out   index.json
+          # Show a small summary so the workflow log is useful at-a-glance.
+          jq '{ schemaVersion, repositoryName, packageCount: (.packages | length) }' index.json
+
+      - name: Replace the `index` release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: index
+          name:     Catalog index (auto-updated)
+          body:     "Auto-generated index of every per-module release in this repository."
+          files:    index.json
+          # `softprops/action-gh-release` updates existing releases with the
+          # same tag, replacing assets in-place. No manual delete needed.
