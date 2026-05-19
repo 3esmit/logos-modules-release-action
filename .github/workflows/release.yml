@@ -40,10 +40,13 @@ on:
         default: "none"
       signing_command:
         description: |
-          Shell command (signing_mode=external). Receives `LGX_PATH` env
-          var pointing at the unsigned `.lgx`. Must, on success, either
-          modify $LGX_PATH in place or write the signed package to
-          $LGX_SIGNED_OUT (this workflow sets it before invoking).
+          Shell command (signing_mode=external). Run as
+          `bash -c "$SIGNING_COMMAND"` — passed through the environment,
+          NOT interpolated into the workflow body, so single/double
+          quotes inside it are safe and need no escaping. Receives
+          `LGX_PATH` (unsigned input) and `LGX_SIGNED_OUT`; must, on
+          success, either modify $LGX_PATH in place or write the signed
+          package to $LGX_SIGNED_OUT.
         type: string
         default: ""
       signing_command_image:
@@ -72,7 +75,7 @@ jobs:
       # inputs unless `shallow = true;` is specified in the URL —
       # which we can't control from inside the action. Cloning fully
       # is the path of least surprise.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           submodules: recursive
           fetch-depth: 0
@@ -81,6 +84,25 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
+          # ── Fail fast on invalid inputs ──────────────────────────────
+          # Without this an unrecognised signing_mode (e.g. "Inline",
+          # "sign") silently produces an UNSIGNED release — both the
+          # inline and external steps are `if:`-gated on exact strings,
+          # so a typo means "no signing" with no error. That's a
+          # correctness/security footgun; reject it here instead.
+          case "${{ inputs.signing_mode }}" in
+            none|inline|external) ;;
+            *)
+              echo "::error::invalid signing_mode '${{ inputs.signing_mode }}' (expected: none, inline, external)"
+              exit 1
+              ;;
+          esac
+          if [[ "${{ inputs.signing_mode }}" == "external" && -z "${{ inputs.signing_command }}" ]]; then
+            echo "::error::signing_mode=external requires a non-empty signing_command"
+            exit 1
+          fi
+
           mpath="${{ inputs.module_path }}"
           if [[ ! -f "$mpath/metadata.json" ]]; then
             echo "::error::no metadata.json at $mpath"; exit 1
@@ -91,11 +113,26 @@ jobs:
           if [[ -z "$ver"  || "$ver"  == "null" ]]; then echo "::error::metadata.json missing version"; exit 1; fi
           echo "module_name=$name" >> "$GITHUB_OUTPUT"
           echo "version=$ver"      >> "$GITHUB_OUTPUT"
-          # JSON array form for matrix consumption.
-          IFS=',' read -ra V <<< "${{ inputs.variants }}"
+          # JSON array form for matrix consumption. Drop blank tokens
+          # (trailing comma, "a,,b", all-whitespace) so a malformed or
+          # empty `variants` input fails here rather than producing a
+          # matrix with an empty/garbage variant that fails opaquely in
+          # the build job.
+          IFS=',' read -ra V <<< "${{ inputs.variants }}" || true
           arr="["
-          for v in "${V[@]}"; do arr+="\"${v//[[:space:]]/}\","; done
+          # "${V[@]:-}" — empty/unset array is safe under `set -u`
+          # (bash 3.2+); the empty token is skipped by the guard below
+          # and an all-empty input falls through to the [] check.
+          for v in "${V[@]:-}"; do
+            t="${v//[[:space:]]/}"
+            [[ -z "$t" ]] && continue
+            arr+="\"$t\","
+          done
           arr="${arr%,}]"
+          if [[ "$arr" == "[]" ]]; then
+            echo "::error::variants input parsed to an empty list (got: '${{ inputs.variants }}')"
+            exit 1
+          fi
           echo "variants=$arr" >> "$GITHUB_OUTPUT"
 
   build:
@@ -122,7 +159,7 @@ jobs:
       # Same full-clone rationale as the setup job: Nix flake inputs
       # that reference the local working tree refuse to consume a
       # shallow clone.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           submodules: recursive
           fetch-depth: 0
@@ -132,7 +169,10 @@ jobs:
       # DS detects pre-existing Nix installs and skips the user-creation
       # step gracefully on all current GitHub runners (Apple silicon
       # macOS, ubuntu-latest, ubuntu-24.04-arm).
-      - uses: DeterminateSystems/nix-installer-action@main
+      # Pinned to an immutable release SHA (was @main — a moving ref, a
+      # supply-chain + reproducibility risk). Bump deliberately; CI's
+      # actionlint + Dependabot (.github/dependabot.yml) surface updates.
+      - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
         with:
           extra-conf: |
             experimental-features = nix-command flakes
@@ -164,7 +204,7 @@ jobs:
       # `<module>-<variant>` keeps names unique across the umbrella
       # while the per-module standalone workflow still produces a
       # well-formed artifact set.
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: lgx-${{ needs.setup.outputs.module_name }}-${{ matrix.variant }}
           path: _artifacts/*.lgx
@@ -182,10 +222,13 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       # Same DeterminateSystems-installer rationale as the build job —
       # avoids the macOS runner's eDSRecordAlreadyExists issue.
-      - uses: DeterminateSystems/nix-installer-action@main
+      # Pinned to an immutable release SHA (was @main — a moving ref, a
+      # supply-chain + reproducibility risk). Bump deliberately; CI's
+      # actionlint + Dependabot (.github/dependabot.yml) surface updates.
+      - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
         with:
           extra-conf: |
             experimental-features = nix-command flakes
@@ -208,7 +251,7 @@ jobs:
       # run hosts uploads from every other module too (lgx-<other>-*).
       # Without the module-name prefix the merge step would pull all
       # of them and `lgx merge` would fail on the mismatched manifests.
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: _per-variant
           pattern: lgx-${{ needs.setup.outputs.module_name }}-*
@@ -251,6 +294,20 @@ jobs:
           esac
           echo "lgx=$out" >> "$GITHUB_OUTPUT"
 
+          # Which variants actually made it into this release. Artifact
+          # files are named "<module>-<variant>.lgx" (see the build
+          # job's cp). The module name is known exactly, so stripping
+          # the "<name>-" prefix + ".lgx" suffix yields the variant even
+          # though both names contain dashes. Emitted as a sorted,
+          # comma-separated list for the sidecar / release-notes steps.
+          built=()
+          for f in "${variants[@]}"; do
+            b="$(basename "$f" .lgx)"   # <name>-<variant>
+            built+=("${b#"${name}-"}")
+          done
+          built_csv="$(printf '%s\n' "${built[@]}" | sort -u | paste -sd, -)"
+          echo "built=$built_csv" >> "$GITHUB_OUTPUT"
+
       - name: Verify merged package (pre-sign)
         run: lgx verify "${{ steps.merge.outputs.lgx }}"
 
@@ -275,20 +332,29 @@ jobs:
         shell: bash
         env:
           LGX_PATH: ${{ steps.merge.outputs.lgx }}
+          # Caller-supplied values reach the script through the
+          # environment, never via `${{ … }}` interpolated into the
+          # run body. `bash -c '${{ inputs.signing_command }}'`
+          # substitutes at YAML-render time: a command containing a
+          # single quote breaks the script, and arbitrary text rendered
+          # into shell is a script-injection seam. As env vars they
+          # arrive at bash verbatim, as a single argv element.
+          SIGNING_COMMAND: ${{ inputs.signing_command }}
+          SIGNING_COMMAND_IMAGE: ${{ inputs.signing_command_image }}
         run: |
           set -euo pipefail
-          if [[ -z "${{ inputs.signing_command }}" ]]; then
+          if [[ -z "${SIGNING_COMMAND:-}" ]]; then
             echo "::error::signing_mode=external requires signing_command"; exit 1
           fi
           export LGX_SIGNED_OUT="${LGX_PATH%.lgx}.signed.lgx"
-          if [[ -n "${{ inputs.signing_command_image }}" ]]; then
+          if [[ -n "${SIGNING_COMMAND_IMAGE:-}" ]]; then
             docker run --rm \
               -v "$PWD:/work" -w /work \
               -e LGX_PATH="$LGX_PATH" -e LGX_SIGNED_OUT="$LGX_SIGNED_OUT" \
-              "${{ inputs.signing_command_image }}" \
-              bash -c '${{ inputs.signing_command }}'
+              "$SIGNING_COMMAND_IMAGE" \
+              bash -c "$SIGNING_COMMAND"
           else
-            bash -c '${{ inputs.signing_command }}'
+            bash -c "$SIGNING_COMMAND"
           fi
           if [[ -f "$LGX_SIGNED_OUT" ]]; then mv "$LGX_SIGNED_OUT" "$LGX_PATH"; fi
           lgx verify "$LGX_PATH"
@@ -314,6 +380,18 @@ jobs:
             # `.lgx` is gzip-tar, not zip; use tar to peek instead.
             sig=$(tar -O -xzf "$lgx" manifest.sig 2>/dev/null || true)
           fi
+          # Partial-variant visibility: which variants were requested
+          # (setup output) vs actually built (merge output). The build
+          # matrix uses fail-fast:false, so a release can legitimately
+          # ship fewer variants than requested — record exactly which,
+          # so operators and clients don't have to diff release assets
+          # by hand. Additive sidecar fields; schemaVersion is unchanged
+          # and consumers that ignore unknown keys are unaffected.
+          requested_json='${{ needs.setup.outputs.variants }}'
+          built_json=$(printf '%s' '${{ steps.merge.outputs.built }}' \
+                       | jq -R 'split(",") | map(select(length>0))')
+          missing_json=$(jq -cn --argjson r "$requested_json" --argjson b "$built_json" '$r - $b')
+
           jq -n \
              --arg releaseTag "${{ needs.setup.outputs.module_name }}-v${{ needs.setup.outputs.version }}" \
              --arg releasedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
@@ -321,30 +399,50 @@ jobs:
              --arg rootHash "$mroot" \
              --argjson manifest "$manifest" \
              --arg signature "$sig" \
+             --argjson builtVariants "$built_json" \
+             --argjson missingVariants "$missing_json" \
              '{
-                publisherRef: $releaseTag,
-                releasedAt:   $releasedAt,
-                sha256:       $sha,
-                size:         $size,
-                rootHash:     $rootHash,
-                manifest:     $manifest
+                publisherRef:    $releaseTag,
+                releasedAt:      $releasedAt,
+                sha256:          $sha,
+                size:            $size,
+                rootHash:        $rootHash,
+                builtVariants:   $builtVariants,
+                missingVariants: $missingVariants,
+                manifest:        $manifest
               } + (if ($signature | length) > 0
                    then { signature: ($signature | fromjson) }
                    else {} end)' > sidecar.json
           echo "lgx=$lgx" >> "$GITHUB_OUTPUT"
           echo "sidecar=$PWD/sidecar.json" >> "$GITHUB_OUTPUT"
 
+          # Human-readable release body (the rebuild-index step reads
+          # the sidecar, not this — this is purely for the GitHub UI).
+          built_list=$(jq -r 'join(", ")' <<<"$built_json")
+          missing_list=$(jq -r 'if length>0 then join(", ") else "—" end' <<<"$missing_json")
+          {
+            echo 'notes<<__NOTES_EOF__'
+            echo "Built variants: ${built_list}"
+            echo "Missing variants: ${missing_list}"
+            if [[ "$missing_list" != "—" ]]; then
+              echo
+              echo "_Partial release — some requested variants did not build._"
+            fi
+            echo '__NOTES_EOF__'
+          } >> "$GITHUB_OUTPUT"
+
       - name: Create / update GitHub release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: ${{ needs.setup.outputs.module_name }}-v${{ needs.setup.outputs.version }}
           name:     ${{ needs.setup.outputs.module_name }} v${{ needs.setup.outputs.version }}
+          body:     ${{ steps.sidecar.outputs.notes }}
           files: |
             ${{ steps.sidecar.outputs.lgx }}
             ${{ steps.sidecar.outputs.sidecar }}
 
       - name: Trigger rebuild-index workflow
         if: success()
-        uses: peter-evans/repository-dispatch@v3
+        uses: peter-evans/repository-dispatch@ff45666b9427631e3450c54a1bcbee4d9ff4d7c0 # v3
         with:
           event-type: rebuild-index

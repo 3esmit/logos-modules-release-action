@@ -1,0 +1,47 @@
+name: CI
+
+# Lints this action's own workflows + scripts so a regression is
+# caught before the v1 tag is advanced (consumers pin @v1, so a bad
+# push to the v1 line breaks every catalog at once).
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  workflows:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      # actionlint also runs shellcheck on `run:` blocks when shellcheck
+      # is on PATH (preinstalled on ubuntu-latest runners).
+      - name: actionlint
+        env:
+          ACTIONLINT_VERSION: "1.7.7"
+        run: |
+          set -euo pipefail
+          curl -fsSL -o actionlint.tar.gz \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          tar -xzf actionlint.tar.gz actionlint
+          ./actionlint -color
+
+      - name: yamllint
+        run: |
+          set -euo pipefail
+          python3 -m pip install --quiet --user yamllint
+          "$(python3 -m site --user-base)/bin/yamllint" -s .
+
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Compile + unit tests
+        run: |
+          set -euo pipefail
+          python3 -m py_compile scripts/build_index.py
+          python3 -m unittest discover -s scripts -p 'test_*.py' -v

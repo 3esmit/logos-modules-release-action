@@ -15,6 +15,19 @@ on:
   schedule:
     - cron: '17 */6 * * *'   # every six hours; catches missed dispatches
 
+# Serialize rebuilds per consumer repo. An umbrella "release all"
+# fans out N per-module releases, each firing a `rebuild-index`
+# repository_dispatch — without this they race to upload index.json
+# to the `index` release and the last writer is nondeterministic.
+# `build_index.py` does a full rescan of every release each run, so a
+# newer run strictly supersedes an in-flight one: cancel-in-progress
+# coalesces the burst into one final, authoritative rebuild. (In a
+# reusable workflow `github.repository` is the CALLER's repo, so the
+# group is correctly per-catalog.)
+concurrency:
+  group: rebuild-index-${{ github.repository }}
+  cancel-in-progress: true
+
 jobs:
   rebuild:
     runs-on: ubuntu-latest
@@ -25,7 +38,7 @@ jobs:
       # builder talks to the GitHub API, doesn't read the working
       # tree). We do it anyway because softprops/action-gh-release
       # is friendlier when invoked from inside the caller's checkout.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       # `scripts/build_index.py` lives in THIS action repo, not in
       # the caller. Reusable workflows don't get an automatic
@@ -34,8 +47,16 @@ jobs:
       # context inside a called workflow refers to the CALLER's repo).
       # We pin to `v1`, which matches the tag the caller workflow used
       # to invoke us; advance both the v1 tag and the script in lockstep.
+      #
+      # NOTE (deliberately not made configurable): a Copilot review
+      # suggested an input to override this ref so a future `@v2`
+      # caller doesn't pull `@v1`'s build_index.py. For the v1 line the
+      # lockstep "advance tag + script together" rule keeps this
+      # correct, and an input would push version-coupling onto every
+      # consumer. Revisit when v2 is actually introduced — at that
+      # point the v2 rebuild-index.yml hardcodes `ref: v2`, same rule.
       - name: Checkout release-action repo (for build_index.py)
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           repository: logos-co/logos-modules-release-action
           ref: v1
@@ -54,7 +75,7 @@ jobs:
           jq '{ schemaVersion, repositoryName, packageCount: (.packages | length) }' index.json
 
       - name: Replace the `index` release asset
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: index
           name:     Catalog index (auto-updated)
