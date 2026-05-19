@@ -55,6 +55,17 @@ on:
           Empty means run on the runner directly.
         type: string
         default: ""
+      skip_if_published:
+        description: |
+          When true (default), skip the build + release if a release
+          tagged `<module>-v<version>` already exists in the caller
+          repo AND carries both a `.lgx` and a `sidecar.json` asset
+          (i.e. it will already be — or already is — in the index).
+          A half-published release missing either asset is NOT skipped
+          so it can self-heal. Set false to force a rebuild/republish
+          of the same version.
+        type: boolean
+        default: true
     secrets:
       signing_key:
         description: |
@@ -64,10 +75,15 @@ on:
 jobs:
   setup:
     runs-on: ubuntu-latest
+    # Reading the caller's releases (public repos need no auth, but be
+    # explicit so private catalogs work too).
+    permissions:
+      contents: read
     outputs:
-      module_name: ${{ steps.meta.outputs.module_name }}
-      version:     ${{ steps.meta.outputs.version }}
-      variants:    ${{ steps.meta.outputs.variants }}
+      module_name:       ${{ steps.meta.outputs.module_name }}
+      version:           ${{ steps.meta.outputs.version }}
+      variants:          ${{ steps.meta.outputs.variants }}
+      already_published: ${{ steps.published.outputs.already_published }}
     steps:
       # fetch-depth: 0 produces a full (non-shallow) clone. Required
       # because module flake.nix files use `git+file://…` flake inputs
@@ -135,8 +151,45 @@ jobs:
           fi
           echo "variants=$arr" >> "$GITHUB_OUTPUT"
 
+      - id: published
+        name: Check if this version is already published
+        # Skip the (expensive) Nix build when `<module>-v<version>` is
+        # already a release carrying both a `.lgx` and a `sidecar.json`
+        # — i.e. it is, or will be on the next index rebuild, in the
+        # catalog. The release (not index.json) is the source of truth:
+        # the index is derived from releases and is eventually
+        # consistent, so a release that fully exists is the correct,
+        # race-free gate. A release missing either asset is treated as
+        # NOT published so a half-finished prior run self-heals.
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [[ "${{ inputs.skip_if_published }}" != "true" ]]; then
+            echo "skip_if_published=false — will build/republish regardless"
+            echo "already_published=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          tag="${{ steps.meta.outputs.module_name }}-v${{ steps.meta.outputs.version }}"
+          if rel=$(gh api "repos/${GH_REPO}/releases/tags/${tag}" 2>/dev/null); then
+            has_lgx=$(jq '[.assets[]?.name | select(endswith(".lgx"))] | length' <<<"$rel")
+            has_side=$(jq '[.assets[]?.name | select(. == "sidecar.json")] | length' <<<"$rel")
+            if [[ "${has_lgx:-0}" -gt 0 && "${has_side:-0}" -gt 0 ]]; then
+              echo "::notice::${tag} already published (.lgx + sidecar present) — skipping build"
+              echo "already_published=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "::notice::${tag} release exists but is missing assets — rebuilding to heal"
+          else
+            echo "${tag} not yet published — building"
+          fi
+          echo "already_published=false" >> "$GITHUB_OUTPUT"
+
   build:
     needs: setup
+    if: needs.setup.outputs.already_published != 'true'
     strategy:
       # Not every module's flake.nix defines outputs for every variant
       # — e.g. some modules pre-date the linux-arm64 default and only
@@ -216,8 +269,12 @@ jobs:
     # We still gate on `setup` having produced module_name + version —
     # without those the rest of the job has nothing to do. The merge
     # step below errors when zero variants downloaded, so a total
-    # build wipeout still fails the run loudly.
-    if: always() && needs.setup.result == 'success'
+    # build wipeout still fails the run loudly. `already_published`
+    # short-circuits the whole pipeline (build was skipped too).
+    if: >-
+      always()
+      && needs.setup.result == 'success'
+      && needs.setup.outputs.already_published != 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -443,6 +500,26 @@ jobs:
 
       - name: Trigger rebuild-index workflow
         if: success()
+        uses: peter-evans/repository-dispatch@ff45666b9427631e3450c54a1bcbee4d9ff4d7c0 # v3
+        with:
+          event-type: rebuild-index
+
+  # Runs only on the skip path. The build/release jobs are gated off,
+  # so this is where we (cheaply) nudge the index in case a prior run
+  # published the release but its rebuild-index never landed — the
+  # 6-hourly schedule would eventually catch it, but a dispatch here
+  # makes "already published" promptly imply "in the index".
+  already-published:
+    needs: setup
+    if: needs.setup.outputs.already_published == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Summarise skip
+        run: |
+          echo "::notice::Skipped build/release — ${{ needs.setup.outputs.module_name }}-v${{ needs.setup.outputs.version }} is already published. Nudging rebuild-index."
+      - name: Trigger rebuild-index workflow
         uses: peter-evans/repository-dispatch@ff45666b9427631e3450c54a1bcbee4d9ff4d7c0 # v3
         with:
           event-type: rebuild-index

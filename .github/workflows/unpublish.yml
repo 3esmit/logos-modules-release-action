@@ -1,0 +1,146 @@
+name: Unpublish module
+
+# Reusable workflow that REMOVES module releases from a catalog —
+# either every version of a module or one specific version — then
+# rebuilds index.json so clients stop offering the removed package(s).
+#
+# This is destructive and irreversible (GitHub release + optionally its
+# git tag are deleted). It is `workflow_call` + `workflow_dispatch`
+# only; consumers wire a thin wrapper (see logos-modules-release-base's
+# unpublish.yml) so it shows up as a manual, input-driven action.
+#
+# The catalog index is DERIVED from releases by build_index.py, so
+# deleting the releases and rebuilding the index is the entire
+# operation — there is no separate index entry to surgically edit.
+
+on:
+  workflow_call:
+    inputs:
+      module:
+        description: "Module name — the `<name>` in `<name>-v<version>` release tags."
+        type: string
+        required: true
+      version:
+        description: "Exact version to remove (e.g. 1.2.3). Blank = ALL versions of the module."
+        type: string
+        default: ""
+      delete_tags:
+        description: "Also delete the underlying git tag(s), not just the GitHub release."
+        type: boolean
+        default: true
+      dry_run:
+        description: "List what would be deleted and stop (no deletion, no rebuild)."
+        type: boolean
+        default: false
+  workflow_dispatch:
+    inputs:
+      module:
+        description: "Module name — the `<name>` in `<name>-v<version>` release tags."
+        type: string
+        required: true
+      version:
+        description: "Exact version to remove. Blank = ALL versions."
+        type: string
+        default: ""
+      delete_tags:
+        description: "Also delete the git tag(s)."
+        type: boolean
+        default: true
+      dry_run:
+        description: "List what would be deleted and stop."
+        type: boolean
+        default: false
+
+# Deleting releases / tags needs write; the rebuild dispatch too.
+permissions:
+  contents: write
+
+jobs:
+  unpublish:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      MODULE: ${{ inputs.module }}
+      VERSION: ${{ inputs.version }}
+      DELETE_TAGS: ${{ inputs.delete_tags }}
+      DRY_RUN: ${{ inputs.dry_run }}
+    steps:
+      - name: Resolve target releases
+        id: resolve
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Module name must match the same grammar build_index.py's
+          # TAG_RE accepts, so we can never accidentally select the
+          # rolling `index` release or an unrelated tag.
+          if ! [[ "$MODULE" =~ ^[a-z][a-z0-9_-]*$ ]]; then
+            echo "::error::invalid module name '$MODULE' (expected ^[a-z][a-z0-9_-]*$)"
+            exit 1
+          fi
+
+          if [[ -n "$VERSION" ]]; then
+            want="${MODULE}-v${VERSION}"
+            echo "Target: exact tag '${want}'"
+          else
+            want=""
+            echo "Target: every '${MODULE}-v*' release"
+          fi
+
+          # Enumerate all releases (paginated) and select matches.
+          # Guard hard against the reserved `index` tag.
+          mapfile -t tags < <(
+            gh api --paginate "repos/${GH_REPO}/releases" \
+              --jq '.[].tag_name' \
+            | while read -r t; do
+                [[ "$t" == "index" ]] && continue
+                if [[ -n "$want" ]]; then
+                  [[ "$t" == "$want" ]] && echo "$t"
+                else
+                  [[ "$t" == "${MODULE}-v"* ]] && echo "$t"
+                fi
+              done
+          )
+
+          if [[ ${#tags[@]} -eq 0 ]]; then
+            echo "::warning::no matching releases for module='${MODULE}' version='${VERSION:-<all>}' — nothing to do"
+            echo "count=0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          printf 'Matched %d release(s):\n' "${#tags[@]}"
+          printf '  %s\n' "${tags[@]}"
+          # Newline-free single-line list for the next step.
+          {
+            echo "count=${#tags[@]}"
+            echo "tags<<__TAGS_EOF__"
+            printf '%s\n' "${tags[@]}"
+            echo "__TAGS_EOF__"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Delete releases
+        if: steps.resolve.outputs.count != '0' && inputs.dry_run != true
+        shell: bash
+        run: |
+          set -euo pipefail
+          cleanup=()
+          [[ "$DELETE_TAGS" == "true" ]] && cleanup=(--cleanup-tag)
+          while IFS= read -r tag; do
+            [[ -z "$tag" ]] && continue
+            echo "==> deleting release '$tag'${DELETE_TAGS:+ (+ tag)}"
+            gh release delete "$tag" --repo "$GH_REPO" --yes "${cleanup[@]}"
+          done <<< "${{ steps.resolve.outputs.tags }}"
+
+      - name: Dry run summary
+        if: steps.resolve.outputs.count != '0' && inputs.dry_run == true
+        run: |
+          echo "::notice::DRY RUN — would delete ${{ steps.resolve.outputs.count }} release(s); no changes made, index not rebuilt."
+
+      # Rebuild the index so the removed versions disappear from
+      # index.json. Skipped on dry-run and when nothing matched.
+      - name: Trigger rebuild-index
+        if: steps.resolve.outputs.count != '0' && inputs.dry_run != true
+        uses: peter-evans/repository-dispatch@ff45666b9427631e3450c54a1bcbee4d9ff4d7c0 # v3
+        with:
+          event-type: rebuild-index

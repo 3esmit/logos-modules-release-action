@@ -52,6 +52,52 @@ jobs:
 Repeat per module. Bumping the submodule pointer (and thereby its
 `metadata.json` `version`) is what triggers a new release.
 
+### Idempotent releases (skip if already published)
+
+`release.yml` skips the (expensive) Nix build when a release tagged
+`<module>-v<version>` already exists **and** carries both a `.lgx` and
+a `sidecar.json` asset — i.e. that version is, or will be on the next
+index rebuild, in the catalog. Re-running a workflow for an unchanged
+submodule is therefore a fast no-op, and the umbrella "release all"
+only rebuilds modules whose version actually moved.
+
+- The release (not `index.json`) is the source of truth — the index is
+  derived from releases and eventually consistent, so release-existence
+  is the correct, race-free gate.
+- A release missing either asset is treated as **not** published, so a
+  half-finished prior run self-heals on the next trigger.
+- On the skip path the action still nudges `rebuild-index`, so
+  "already published" promptly implies "in the index".
+- Force a rebuild/republish of the same version with
+  `skip_if_published: false`.
+
+### Unpublishing (remove a module or a version)
+
+```yaml
+# .github/workflows/unpublish.yml in your repo
+on: { workflow_dispatch: { inputs: {
+  module:  { required: true, type: string },
+  version: { type: string, default: "" },     # blank = ALL versions
+  delete_tags: { type: boolean, default: true },
+  dry_run: { type: boolean, default: false } } } }
+permissions: { contents: write }
+jobs:
+  unpublish:
+    uses: logos-co/logos-modules-release-action/.github/workflows/unpublish.yml@v1
+    with:
+      module:      ${{ inputs.module }}
+      version:     ${{ inputs.version }}
+      delete_tags: ${{ inputs.delete_tags }}
+      dry_run:     ${{ inputs.dry_run }}
+```
+
+Deletes the matching GitHub release(s) (every `<module>-v*` when
+`version` is blank, otherwise just `<module>-v<version>`), optionally
+their git tags, then rebuilds `index.json` so clients stop offering the
+removed package(s). The rolling `index` release is hard-guarded against
+deletion. **`dry_run: true` lists what would be removed and stops** —
+run that first; deletion is irreversible.
+
 You also need a one-shot workflow that wires up rebuild-index for
 automatic triggering, plus a top-level `logos-repo.json` at the repo
 root:
