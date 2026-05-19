@@ -4,6 +4,11 @@ extends: default
 
 rules:
   line-length: disable
+  # The workflows deliberately column-align `with:` / output values
+  # (`name:     …`, `tag_name: …`) for readability — a long-standing
+  # style in this repo. yamllint's default cap of one space after a
+  # colon fights that for zero correctness benefit.
+  colons: disable
   truthy:
     allowed-values: ["true", "false"]
     check-keys: false
