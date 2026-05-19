@@ -1,0 +1,12 @@
+# Keeps the SHA-pinned action references current. Pinning to immutable
+# commit SHAs (see release.yml / rebuild-index.yml / ci.yml) removes the
+# supply-chain risk of moving tags; Dependabot restores the "stay up to
+# date" half by opening PRs that bump the SHA + its `# vX` comment.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "ci"

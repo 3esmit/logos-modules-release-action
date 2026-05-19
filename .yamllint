@@ -1,0 +1,20 @@
+# Relaxed yamllint — GitHub Actions YAML uses `on:` (truthy) and is
+# frequently wide; we only care about real structural problems.
+extends: default
+
+rules:
+  line-length: disable
+  truthy:
+    allowed-values: ["true", "false"]
+    check-keys: false
+  comments:
+    min-spaces-from-content: 1
+  document-start: disable
+  braces:
+    max-spaces-inside: 1
+  indentation:
+    spaces: consistent
+    indent-sequences: whatever
+
+ignore: |
+  _action-tools/

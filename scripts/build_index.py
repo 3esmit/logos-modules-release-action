@@ -33,10 +33,76 @@ import argparse
 import datetime as _dt
 import json
 import os
+import random
 import re
 import sys
+import time
+import urllib.error
 import urllib.parse
 import urllib.request
+
+# Transient failures we retry. 429 = secondary/again rate limit,
+# 5xx = GitHub-side blips. 403 is ambiguous (auth failure vs primary
+# rate limit); we only retry it when it carries rate-limit headers.
+_RETRY_STATUS = {429, 500, 502, 503, 504}
+_MAX_ATTEMPTS = 5
+_BASE_DELAY = 1.5  # seconds; exponential with full jitter
+
+
+def _sleep_for(attempt: int, retry_after: str | None) -> None:
+    if retry_after:
+        try:
+            time.sleep(min(60.0, float(retry_after)))
+            return
+        except ValueError:
+            pass
+    # Exponential backoff with full jitter, capped.
+    cap = min(30.0, _BASE_DELAY * (2 ** attempt))
+    time.sleep(random.uniform(0, cap))
+
+
+def _urlopen_retry(req: "urllib.request.Request", *, what: str):
+    """urlopen with bounded retry/backoff for transient GitHub failures.
+
+    Raises the last error if every attempt fails — callers keep their
+    existing try/except, so a permanently-bad release still degrades to
+    a skip rather than aborting the whole index rebuild.
+    """
+    last: Exception | None = None
+    for attempt in range(_MAX_ATTEMPTS):
+        try:
+            return urllib.request.urlopen(req)
+        except urllib.error.HTTPError as e:  # noqa: PERF203
+            last = e
+            rate_limited_403 = (
+                e.code == 403
+                and e.headers is not None
+                and e.headers.get("X-RateLimit-Remaining") == "0"
+            )
+            if e.code in _RETRY_STATUS or rate_limited_403:
+                if attempt == _MAX_ATTEMPTS - 1:
+                    break
+                ra = e.headers.get("Retry-After") if e.headers else None
+                print(
+                    f"warning: {what}: HTTP {e.code}, retry "
+                    f"{attempt + 1}/{_MAX_ATTEMPTS - 1}",
+                    file=sys.stderr,
+                )
+                _sleep_for(attempt, ra)
+                continue
+            raise
+        except urllib.error.URLError as e:  # network / DNS / TLS blip
+            last = e
+            if attempt == _MAX_ATTEMPTS - 1:
+                break
+            print(
+                f"warning: {what}: {e!r}, retry "
+                f"{attempt + 1}/{_MAX_ATTEMPTS - 1}",
+                file=sys.stderr,
+            )
+            _sleep_for(attempt, None)
+    assert last is not None
+    raise last
 
 
 def gh_api(url: str, token: str) -> dict | list:
@@ -49,7 +115,7 @@ def gh_api(url: str, token: str) -> dict | list:
             "User-Agent": "logos-modules-release-action",
         },
     )
-    with urllib.request.urlopen(req) as r:
+    with _urlopen_retry(req, what=f"GET {url}") as r:
         return json.loads(r.read())
 
 
@@ -82,7 +148,7 @@ def fetch_asset(url: str, token: str) -> bytes:
             "User-Agent": "logos-modules-release-action",
         },
     )
-    with urllib.request.urlopen(req) as r:
+    with _urlopen_retry(req, what=f"GET asset {url}") as r:
         return r.read()
 
 
