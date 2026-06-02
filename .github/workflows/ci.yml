@@ -36,12 +36,8 @@ jobs:
           python3 -m pip install --quiet --user yamllint
           "$(python3 -m site --user-base)/bin/yamllint" -s .
 
-  python:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-      - name: Compile + unit tests
-        run: |
-          set -euo pipefail
-          python3 -m py_compile scripts/build_index.py
-          python3 -m unittest discover -s scripts -p 'test_*.py' -v
+  # `python:` job removed when `scripts/build_index.py` left this repo
+  # for `logos-co/logos-modules-release-tool` (its `index.py` now does
+  # the indexing; this action workflow only invokes it). The new tool
+  # repo owns its own Python tests; nothing python-shaped lives here
+  # anymore to compile or unit-test.

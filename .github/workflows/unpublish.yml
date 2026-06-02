@@ -9,7 +9,8 @@ name: Unpublish module
 # only; consumers wire a thin wrapper (see logos-modules-release-base's
 # unpublish.yml) so it shows up as a manual, input-driven action.
 #
-# The catalog index is DERIVED from releases by build_index.py, so
+# The catalog index is DERIVED from the releases by rebuild-index.yml
+# (which delegates to logos-modules-release-tool's `index.py`), so
 # deleting the releases and rebuilding the index is the entire
 # operation — there is no separate index entry to surgically edit.
 
@@ -72,9 +73,12 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Module name must match the same grammar build_index.py's
-          # TAG_RE accepts, so we can never accidentally select the
-          # rolling `index` release or an unrelated tag.
+          # Conservative module-name grammar: lowercase letter prefix,
+          # then lowercase / digit / `_` / `-`. The rolling `index`
+          # release tag would slip through `^[a-z]+$` — keep this
+          # locked to the catalog's actual module-name shape so the
+          # search/destroy path can never select it or an unrelated
+          # tag.
           if ! [[ "$MODULE" =~ ^[a-z][a-z0-9_-]*$ ]]; then
             echo "::error::invalid module name '$MODULE' (expected ^[a-z][a-z0-9_-]*$)"
             exit 1
