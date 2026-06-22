@@ -63,7 +63,8 @@ on:
           (i.e. it will already be — or already is — in the index).
           A half-published release missing either asset is NOT skipped
           so it can self-heal. Set false to force a rebuild/republish
-          of the same version.
+          of the same version — its assets are overwritten and its tag is
+          re-pointed at the commit that rebuilt them.
         type: boolean
         default: true
     secrets:
@@ -497,6 +498,38 @@ jobs:
           files: |
             ${{ steps.sidecar.outputs.lgx }}
             ${{ steps.sidecar.outputs.sidecar }}
+
+      # On a forced republish (skip_if_published=false) the step above
+      # rebuilds the release in place, but a pre-existing tag still points
+      # at the OLD commit — e.g. the submodule pointer moved while
+      # metadata.json#version stayed the same. Move the tag onto the commit
+      # that actually built the published .lgx so tag and artifact agree.
+      #
+      # Guarded to a no-op on the normal new-version path (the tag is
+      # already here, so nothing is pushed). A protected tag that refuses
+      # the move only warns — the package itself is already published, the
+      # tag's commit pointer is cosmetic. Uses the checkout's authenticated
+      # `origin`, so it also works for private catalogs. Lightweight tag,
+      # so no committer identity is needed.
+      - name: Re-point tag at the built commit
+        if: success()
+        shell: bash
+        env:
+          TAG: ${{ needs.setup.outputs.module_name }}-v${{ needs.setup.outputs.version }}
+        run: |
+          set -euo pipefail
+          current="$(git ls-remote origin "refs/tags/${TAG}" | awk 'NR==1{print $1}')"
+          if [[ "${current}" == "${GITHUB_SHA}" ]]; then
+            echo "tag ${TAG} already at ${GITHUB_SHA} — nothing to move"
+            exit 0
+          fi
+          echo "moving tag ${TAG}: ${current:-<none>} -> ${GITHUB_SHA}"
+          if git tag -f "${TAG}" "${GITHUB_SHA}" \
+             && git push -f origin "refs/tags/${TAG}"; then
+            echo "::notice::re-pointed ${TAG} at ${GITHUB_SHA}"
+          else
+            echo "::warning::could not move tag ${TAG} (protected?); the release assets were still updated"
+          fi
 
       - name: Trigger rebuild-index workflow
         if: success()
