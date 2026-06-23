@@ -92,10 +92,39 @@ jobs:
       # inputs unless `shallow = true;` is specified in the URL —
       # which we can't control from inside the action. Cloning fully
       # is the path of least surprise.
+      #
+      # This job builds exactly ONE module (module_path), so fetch only
+      # that submodule — not the whole catalog. `submodules: recursive`
+      # would clone all ~16 sibling submodules on every run: wasted work,
+      # and it couples this module's release to the fetchability of every
+      # unrelated sibling (a single un-cloneable sibling fails the entire
+      # checkout). We materialise just the target module, next.
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
-          submodules: recursive
+          submodules: false
           fetch-depth: 0
+      - name: Check out only the target module submodule
+        shell: bash
+        env:
+          # Authenticate the clone so a private target module still
+          # fetches (public ones clone either way) — parity with the
+          # auth `submodules: recursive` used to propagate for us.
+          GH_TOKEN: ${{ github.token }}
+          MODULE_PATH: ${{ inputs.module_path }}
+        run: |
+          set -euo pipefail
+          git config --global \
+            url."https://x-access-token:${GH_TOKEN}@github.com/".insteadOf \
+            "https://github.com/"
+          if [[ -z "${MODULE_PATH:-}" || "${MODULE_PATH}" == "." ]]; then
+            # The caller repo IS the module (module_path defaults to "."):
+            # materialise its own (nested) submodules, as before.
+            git submodule update --init --recursive
+          else
+            # Catalog repo: fetch just this module's submodule and any
+            # nested submodules it declares — skip every sibling.
+            git submodule update --init --recursive -- "${MODULE_PATH}"
+          fi
       - id: meta
         name: Read metadata.json
         shell: bash
@@ -210,13 +239,30 @@ jobs:
             runs-on: ubuntu-24.04-arm      # Public GitHub arm64 runner (GA'd 2025)
     runs-on: ${{ matrix.runs-on }}
     steps:
-      # Same full-clone rationale as the setup job: Nix flake inputs
-      # that reference the local working tree refuse to consume a
-      # shallow clone.
+      # Same full-clone + single-submodule rationale as the setup job:
+      # Nix flake inputs that reference the local working tree refuse a
+      # shallow clone, and this job builds only `module_path` — so fetch
+      # just that submodule, not every sibling. See the setup job for the
+      # full explanation.
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
-          submodules: recursive
+          submodules: false
           fetch-depth: 0
+      - name: Check out only the target module submodule
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MODULE_PATH: ${{ inputs.module_path }}
+        run: |
+          set -euo pipefail
+          git config --global \
+            url."https://x-access-token:${GH_TOKEN}@github.com/".insteadOf \
+            "https://github.com/"
+          if [[ -z "${MODULE_PATH:-}" || "${MODULE_PATH}" == "." ]]; then
+            git submodule update --init --recursive
+          else
+            git submodule update --init --recursive -- "${MODULE_PATH}"
+          fi
       # DeterminateSystems' installer rather than cachix/install-nix-action@v25,
       # which trips over the macos-latest runner's pre-provisioned _nixbld*
       # users (`<dscl_cmd> DS Error: -14135 (eDSRecordAlreadyExists)`).
