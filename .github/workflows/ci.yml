@@ -36,6 +36,9 @@ jobs:
           python3 -m pip install --quiet --user yamllint
           "$(python3 -m site --user-base)/bin/yamllint" -s .
 
+      - name: Release variant matrix
+        run: scripts/test-release-variant-matrix.sh
+
   # `python:` job removed when `scripts/build_index.py` left this repo
   # for `logos-co/logos-modules-release-tool` (its `index.py` now does
   # the indexing; this action workflow only invokes it). The new tool
