@@ -13,7 +13,8 @@ For each module in your repo, the `release.yml` workflow:
 
 1. Reads `metadata.json` to pick up `name` and `version`.
 2. Builds the module's `.lgx` on a per-variant matrix (Linux + macOS by
-   default).
+   default). Supplying `variants` builds exactly those supported variants;
+   unknown or duplicate names fail before a runner is allocated.
 3. Merges the per-variant artifacts into a single multi-variant `.lgx`
    (via `lgx merge`).
 4. `lgx verify` — fails the run if the package is invalid.
@@ -44,6 +45,7 @@ jobs:
     uses: logos-co/logos-modules-release-action/.github/workflows/release.yml@v1
     with:
       module_path: submodules/logos-chat-module
+      variants: linux-amd64,darwin-arm64
       signing_mode: inline                   # or "external" / "none"
     secrets:
       signing_key: ${{ secrets.LOGOS_SIGNING_KEY }}

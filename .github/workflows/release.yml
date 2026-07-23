@@ -84,6 +84,7 @@ jobs:
       module_name:       ${{ steps.meta.outputs.module_name }}
       version:           ${{ steps.meta.outputs.version }}
       variants:          ${{ steps.meta.outputs.variants }}
+      build_matrix:      ${{ steps.meta.outputs.build_matrix }}
       already_published: ${{ steps.published.outputs.already_published }}
     steps:
       # fetch-depth: 0 produces a full (non-shallow) clone. Required
@@ -128,6 +129,8 @@ jobs:
       - id: meta
         name: Read metadata.json
         shell: bash
+        env:
+          RELEASE_VARIANTS: ${{ inputs.variants }}
         run: |
           set -euo pipefail
 
@@ -159,27 +162,14 @@ jobs:
           if [[ -z "$ver"  || "$ver"  == "null" ]]; then echo "::error::metadata.json missing version"; exit 1; fi
           echo "module_name=$name" >> "$GITHUB_OUTPUT"
           echo "version=$ver"      >> "$GITHUB_OUTPUT"
-          # JSON array form for matrix consumption. Drop blank tokens
-          # (trailing comma, "a,,b", all-whitespace) so a malformed or
-          # empty `variants` input fails here rather than producing a
-          # matrix with an empty/garbage variant that fails opaquely in
-          # the build job.
-          IFS=',' read -ra V <<< "${{ inputs.variants }}" || true
-          arr="["
-          # "${V[@]:-}" — empty/unset array is safe under `set -u`
-          # (bash 3.2+); the empty token is skipped by the guard below
-          # and an all-empty input falls through to the [] check.
-          for v in "${V[@]:-}"; do
-            t="${v//[[:space:]]/}"
-            [[ -z "$t" ]] && continue
-            arr+="\"$t\","
-          done
-          arr="${arr%,}]"
-          if [[ "$arr" == "[]" ]]; then
-            echo "::error::variants input parsed to an empty list (got: '${{ inputs.variants }}')"
-            exit 1
-          fi
-          echo "variants=$arr" >> "$GITHUB_OUTPUT"
+          # Build an explicit matrix instead of using `include` to map
+          # runners: GitHub appends unmatched `include` rows, which would
+          # build variants the caller did not select. The helper validates
+          # supported names, rejects duplicates, and preserves requested
+          # order for both the build matrix and release sidecar.
+          parsed="$(scripts/release-variant-matrix.sh "$RELEASE_VARIANTS")"
+          echo "variants=$(jq -c .variants <<<"$parsed")" >> "$GITHUB_OUTPUT"
+          echo "build_matrix=$(jq -c .matrix <<<"$parsed")" >> "$GITHUB_OUTPUT"
 
       - id: published
         name: Check if this version is already published
@@ -229,15 +219,8 @@ jobs:
       # release rather than dropping the whole module.
       fail-fast: false
       matrix:
-        variant: ${{ fromJson(needs.setup.outputs.variants) }}
-        include:
-          - variant: darwin-arm64
-            runs-on: macos-latest          # Apple silicon
-          - variant: linux-amd64
-            runs-on: ubuntu-latest         # x86_64
-          - variant: linux-arm64
-            runs-on: ubuntu-24.04-arm      # Public GitHub arm64 runner (GA'd 2025)
-    runs-on: ${{ matrix.runs-on }}
+        include: ${{ fromJson(needs.setup.outputs.build_matrix) }}
+    runs-on: ${{ matrix.runner }}
     steps:
       # Same full-clone + single-submodule rationale as the setup job:
       # Nix flake inputs that reference the local working tree refuse a
