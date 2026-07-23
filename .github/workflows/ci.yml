@@ -3,6 +3,8 @@ name: CI
 # Lints this action's own workflows + scripts so a regression is
 # caught before the v1 tag is advanced (consumers pin @v1, so a bad
 # push to the v1 line breaks every catalog at once).
+# The former `python:` job moved with the index implementation; this
+# workflow only invokes it and owns no Python sources to compile or test.
 
 on:
   push:
@@ -38,9 +40,3 @@ jobs:
 
       - name: Release variant matrix
         run: scripts/test-release-variant-matrix.sh
-
-  # `python:` job removed when `scripts/build_index.py` left this repo
-  # for `logos-co/logos-modules-release-tool` (its `index.py` now does
-  # the indexing; this action workflow only invokes it). The new tool
-  # repo owns its own Python tests; nothing python-shaped lives here
-  # anymore to compile or unit-test.
