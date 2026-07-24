@@ -30,7 +30,11 @@ jobs:
           curl -fsSL -o actionlint.tar.gz \
             "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
           tar -xzf actionlint.tar.gz actionlint
-          ./actionlint -color
+          # job.workflow_repository and job.workflow_sha are documented
+          # reusable-workflow contexts, but actionlint does not model them.
+          # Keep the exception narrow so every other expression is linted.
+          ./actionlint -color \
+            -ignore 'property "workflow_(repository|sha)" is not defined'
 
       - name: yamllint
         run: |
@@ -43,3 +47,6 @@ jobs:
 
       - name: Release package target inputs
         run: scripts/test-release-target-inputs.sh
+
+      - name: Release artifact variants
+        run: scripts/test-release-artifact-variants.sh

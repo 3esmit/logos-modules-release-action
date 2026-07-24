@@ -78,6 +78,50 @@ attribute. The resulting LGX manifest is still cross-checked against the
 selected metadata, so package identity, release tag, and sidecar remain tied
 to the built package rather than the source directory.
 
+### Source-owned releases
+
+When the source repository itself owns a package release, call the reusable
+workflow from that repository. The workflow reads its helper scripts from the
+immutable workflow revision, so the source repository does not need to copy
+implementation scripts.
+
+```yaml
+# .github/workflows/release-lez-core.yml
+name: Publish LEZ Core
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    uses: 3esmit/logos-modules-release-action/.github/workflows/release.yml@v1.0.3
+    with:
+      module_path: .
+      metadata_path: metadata.json
+      build_attr: lgx-portable
+      variants: linux-amd64,darwin-arm64
+      require_all_variants: true
+      dispatch_rebuild_index: false
+      prerelease: true
+      signing_mode: none
+```
+
+`require_all_variants` defaults to `false` for compatibility: existing
+catalog callers can still publish the variants that build successfully. Set it
+to `true` for a source-owned release that must offer every requested platform.
+In that mode, failed matrix jobs, missing artifacts, and already-published
+partial sidecars are never treated as a completed release; a replacement is
+published only after every requested build succeeds. `dispatch_rebuild_index`
+defaults to `true`; source repositories should set it to `false` when an
+independent catalog indexes their release assets.
+
+`prerelease` defaults to `false`. Set it to `true` when a package is being
+introduced through an alpha or beta GitHub Release while preserving the package
+version declared by its metadata.
+
 ### Idempotent releases (skip if already published)
 
 `release.yml` skips the (expensive) Nix build when a release tagged

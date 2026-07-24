@@ -43,6 +43,25 @@ on:
         # macOS Intel and Windows are not in the default set — callers
         # that need them can pass an explicit `variants:` list.
         default: "darwin-arm64,linux-amd64,linux-arm64"
+      require_all_variants:
+        description: >-
+          Require every requested variant to build before a release can be
+          created. Defaults to false so existing callers retain partial-release
+          behavior.
+        type: boolean
+        default: false
+      dispatch_rebuild_index:
+        description: >-
+          Dispatch the caller repository's rebuild-index workflow after a
+          successful or already-published release. Source-owned release
+          repositories can set this to false when a separate catalog indexes
+          their assets.
+        type: boolean
+        default: true
+      prerelease:
+        description: "Mark the created GitHub Release as a prerelease."
+        type: boolean
+        default: false
       signing_mode:
         description: "One of: none, inline, external."
         type: string
@@ -115,6 +134,16 @@ jobs:
         with:
           submodules: false
           fetch-depth: 0
+      # A reusable workflow's normal checkout contains the caller repository,
+      # not this workflow's repository. Keep the helper scripts owned by this
+      # action available from the exact workflow SHA that GitHub invoked.
+      - name: Check out release workflow helpers
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: _release-action
+          persist-credentials: false
       - name: Check out only the target module submodule
         shell: bash
         env:
@@ -143,9 +172,10 @@ jobs:
         env:
           METADATA_PATH: ${{ inputs.metadata_path }}
           BUILD_ATTR: ${{ inputs.build_attr }}
+          RELEASE_ACTION_SCRIPTS: ${{ github.workspace }}/_release-action/scripts
         run: |
           set -euo pipefail
-          target="$(scripts/release-target-inputs.sh "$METADATA_PATH" "$BUILD_ATTR")"
+          target="$("$RELEASE_ACTION_SCRIPTS/release-target-inputs.sh" "$METADATA_PATH" "$BUILD_ATTR")"
           echo "metadata_path=$(jq -r .metadata_path <<<"$target")" >> "$GITHUB_OUTPUT"
           echo "build_attr=$(jq -r .build_attr <<<"$target")" >> "$GITHUB_OUTPUT"
       - id: meta
@@ -154,6 +184,7 @@ jobs:
         env:
           RELEASE_VARIANTS: ${{ inputs.variants }}
           METADATA_PATH: ${{ steps.target.outputs.metadata_path }}
+          RELEASE_ACTION_SCRIPTS: ${{ github.workspace }}/_release-action/scripts
         run: |
           set -euo pipefail
 
@@ -191,7 +222,7 @@ jobs:
           # build variants the caller did not select. The helper validates
           # supported names, rejects duplicates, and preserves requested
           # order for both the build matrix and release sidecar.
-          parsed="$(scripts/release-variant-matrix.sh "$RELEASE_VARIANTS")"
+          parsed="$("$RELEASE_ACTION_SCRIPTS/release-variant-matrix.sh" "$RELEASE_VARIANTS")"
           echo "variants=$(jq -c .variants <<<"$parsed")" >> "$GITHUB_OUTPUT"
           echo "build_matrix=$(jq -c .matrix <<<"$parsed")" >> "$GITHUB_OUTPUT"
 
@@ -209,6 +240,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          REQUIRE_ALL_VARIANTS: ${{ inputs.require_all_variants }}
+          REQUESTED_VARIANTS: ${{ steps.meta.outputs.variants }}
         run: |
           set -euo pipefail
           if [[ "${{ inputs.skip_if_published }}" != "true" ]]; then
@@ -221,9 +254,27 @@ jobs:
             has_lgx=$(jq '[.assets[]?.name | select(endswith(".lgx"))] | length' <<<"$rel")
             has_side=$(jq '[.assets[]?.name | select(. == "sidecar.json")] | length' <<<"$rel")
             if [[ "${has_lgx:-0}" -gt 0 && "${has_side:-0}" -gt 0 ]]; then
-              echo "::notice::${tag} already published (.lgx + sidecar present) — skipping build"
-              echo "already_published=true" >> "$GITHUB_OUTPUT"
-              exit 0
+              if [[ "$REQUIRE_ALL_VARIANTS" != "true" ]]; then
+                echo "::notice::${tag} already published (.lgx + sidecar present) — skipping build"
+                echo "already_published=true" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+
+              sidecar_dir="$(mktemp -d)"
+              if gh release download "$tag" --repo "$GH_REPO" \
+                  --pattern sidecar.json --dir "$sidecar_dir"; then
+                requested="$(jq -cS 'sort' <<<"$REQUESTED_VARIANTS")"
+                built="$(jq -cS '(.builtVariants // []) | sort' "$sidecar_dir/sidecar.json")"
+                missing="$(jq -cS '.missingVariants // []' "$sidecar_dir/sidecar.json")"
+                if [[ "$built" == "$requested" && "$missing" == "[]" ]]; then
+                  echo "::notice::${tag} already published with every requested variant — skipping build"
+                  echo "already_published=true" >> "$GITHUB_OUTPUT"
+                  exit 0
+                fi
+                echo "::notice::${tag} is missing requested variants — rebuilding in strict mode"
+              else
+                echo "::notice::${tag} sidecar could not be downloaded — rebuilding in strict mode"
+              fi
             fi
             echo "::notice::${tag} release exists but is missing assets — rebuilding to heal"
           else
@@ -320,22 +371,26 @@ jobs:
 
   release:
     needs: [setup, build]
-    # `if: always()` lets us release when SOME variants succeeded but
-    # others failed (e.g. linux-arm64 missing from a module's flake.nix).
-    # We still gate on `setup` having produced module_name + version —
-    # without those the rest of the job has nothing to do. The merge
-    # step below errors when zero variants downloaded, so a total
-    # build wipeout still fails the run loudly. `already_published`
-    # short-circuits the whole pipeline (build was skipped too).
+    # `if: always()` retains partial-release behavior for callers that do
+    # not require every platform. Strict callers do not mutate a release
+    # unless the complete requested build matrix succeeded.
     if: >-
       always()
       && needs.setup.result == 'success'
       && needs.setup.outputs.already_published != 'true'
+      && (inputs.require_all_variants == false || needs.build.result == 'success')
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Check out release workflow helpers
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: _release-action
+          persist-credentials: false
       # Same DeterminateSystems-installer rationale as the build job —
       # avoids the macOS runner's eDSRecordAlreadyExists issue.
       # Pinned to an immutable release SHA (was @main — a moving ref, a
@@ -372,6 +427,8 @@ jobs:
       - name: Merge per-variant .lgx files
         id: merge
         shell: bash
+        env:
+          RELEASE_ACTION_SCRIPTS: ${{ github.workspace }}/_release-action/scripts
         run: |
           set -euo pipefail
           # `find` (not a shell glob) so an empty match yields zero
@@ -379,10 +436,17 @@ jobs:
           # `mapfile` on an unset/nullglob expansion would otherwise
           # report ${#variants[@]} == 1 and we'd treat "no variants"
           # as "one variant" further down.
+          variants=()
           mapfile -t variants < <(find _per-variant -type f -name '*.lgx' 2>/dev/null || true)
           name="${{ needs.setup.outputs.module_name }}"
           ver="${{ needs.setup.outputs.version }}"
           out="$GITHUB_WORKSPACE/${name}-${ver}.lgx"
+
+          selection="$("$RELEASE_ACTION_SCRIPTS/release-artifact-variants.sh" \
+            "$name" "${{ inputs.require_all_variants }}" \
+            '${{ needs.setup.outputs.variants }}' "${variants[@]}")"
+          built_json="$(jq -c .built <<<"$selection")"
+          missing_json="$(jq -c .missing <<<"$selection")"
 
           case ${#variants[@]} in
             0)
@@ -407,19 +471,11 @@ jobs:
           esac
           echo "lgx=$out" >> "$GITHUB_OUTPUT"
 
-          # Which variants actually made it into this release. Artifact
-          # files are named "<module>-<variant>.lgx" (see the build
-          # job's cp). The module name is known exactly, so stripping
-          # the "<name>-" prefix + ".lgx" suffix yields the variant even
-          # though both names contain dashes. Emitted as a sorted,
-          # comma-separated list for the sidecar / release-notes steps.
-          built=()
-          for f in "${variants[@]}"; do
-            b="$(basename "$f" .lgx)"   # <name>-<variant>
-            built+=("${b#"${name}-"}")
-          done
-          built_csv="$(printf '%s\n' "${built[@]}" | sort -u | paste -sd, -)"
+          # The helper validates the artifact names and, in strict mode,
+          # rejects a missing requested platform before anything is published.
+          built_csv="$(jq -r 'join(",")' <<<"$built_json")"
           echo "built=$built_csv" >> "$GITHUB_OUTPUT"
+          echo "missing=$(jq -r 'join(",")' <<<"$missing_json")" >> "$GITHUB_OUTPUT"
 
       - name: Verify merged package (pre-sign)
         run: lgx verify "${{ steps.merge.outputs.lgx }}"
@@ -493,17 +549,14 @@ jobs:
             # `.lgx` is gzip-tar, not zip; use tar to peek instead.
             sig=$(tar -O -xzf "$lgx" manifest.sig 2>/dev/null || true)
           fi
-          # Partial-variant visibility: which variants were requested
-          # (setup output) vs actually built (merge output). The build
-          # matrix uses fail-fast:false, so a release can legitimately
-          # ship fewer variants than requested — record exactly which,
-          # so operators and clients don't have to diff release assets
-          # by hand. Additive sidecar fields; schemaVersion is unchanged
-          # and consumers that ignore unknown keys are unaffected.
-          requested_json='${{ needs.setup.outputs.variants }}'
+          # Variant visibility: which variants were requested (setup output)
+          # versus actually built (merge output). Non-strict callers can
+          # publish a partial package; strict callers reached this point only
+          # after the helper confirmed the two lists are identical.
           built_json=$(printf '%s' '${{ steps.merge.outputs.built }}' \
                        | jq -R 'split(",") | map(select(length>0))')
-          missing_json=$(jq -cn --argjson r "$requested_json" --argjson b "$built_json" '$r - $b')
+          missing_json=$(printf '%s' '${{ steps.merge.outputs.missing }}' \
+                         | jq -R 'split(",") | map(select(length>0))')
 
           jq -n \
              --arg releaseTag "${{ needs.setup.outputs.module_name }}-v${{ needs.setup.outputs.version }}" \
@@ -550,6 +603,7 @@ jobs:
           tag_name: ${{ needs.setup.outputs.module_name }}-v${{ needs.setup.outputs.version }}
           name:     ${{ needs.setup.outputs.module_name }} v${{ needs.setup.outputs.version }}
           body:     ${{ steps.sidecar.outputs.notes }}
+          prerelease: ${{ inputs.prerelease }}
           files: |
             ${{ steps.sidecar.outputs.lgx }}
             ${{ steps.sidecar.outputs.sidecar }}
@@ -587,7 +641,7 @@ jobs:
           fi
 
       - name: Trigger rebuild-index workflow
-        if: success()
+        if: success() && inputs.dispatch_rebuild_index
         uses: peter-evans/repository-dispatch@ff45666b9427631e3450c54a1bcbee4d9ff4d7c0 # v3
         with:
           event-type: rebuild-index
@@ -608,6 +662,7 @@ jobs:
         run: |
           echo "::notice::Skipped build/release — ${{ needs.setup.outputs.module_name }}-v${{ needs.setup.outputs.version }} is already published. Nudging rebuild-index."
       - name: Trigger rebuild-index workflow
+        if: inputs.dispatch_rebuild_index
         uses: peter-evans/repository-dispatch@ff45666b9427631e3450c54a1bcbee4d9ff4d7c0 # v3
         with:
           event-type: rebuild-index
