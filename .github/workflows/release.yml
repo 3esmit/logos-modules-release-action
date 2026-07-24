@@ -581,10 +581,11 @@ jobs:
           # versus actually built (merge output). Non-strict callers can
           # publish a partial package; strict callers reached this point only
           # after the helper confirmed the two lists are identical.
-          built_json=$(printf '%s' '${{ steps.merge.outputs.built }}' \
-                       | jq -R 'split(",") | map(select(length>0))')
-          missing_json=$(printf '%s' '${{ steps.merge.outputs.missing }}' \
-                         | jq -R 'split(",") | map(select(length>0))')
+          variants_json="$("$RELEASE_ACTION_SCRIPTS/release-sidecar-variants.sh" \
+            '${{ steps.merge.outputs.built }}' \
+            '${{ steps.merge.outputs.missing }}')"
+          built_json=$(jq -c .built <<<"$variants_json")
+          missing_json=$(jq -c .missing <<<"$variants_json")
 
           jq -n \
              --arg releaseTag "${{ needs.setup.outputs.module_name }}-v${{ needs.setup.outputs.version }}" \
