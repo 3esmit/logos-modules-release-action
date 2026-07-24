@@ -62,6 +62,13 @@ on:
         description: "Mark the created GitHub Release as a prerelease."
         type: boolean
         default: false
+      install_macos_metal_toolchain:
+        description: >-
+          Install Apple's optional Metal Toolchain before the darwin-arm64
+          build. Required by callers whose dependency graph compiles Metal
+          kernels (for example, RISC Zero).
+        type: boolean
+        default: false
       signing_mode:
         description: "One of: none, inline, external."
         type: string
@@ -334,6 +341,17 @@ jobs:
         with:
           extra-conf: |
             experimental-features = nix-command flakes
+      # Xcode 26 ships the Metal compiler as an optional component. Keep the
+      # download opt-in: most modules do not need it, while RISC Zero callers
+      # must build the real kernels instead of publishing a reduced artifact.
+      - name: Install macOS Metal Toolchain
+        if: inputs.install_macos_metal_toolchain && matrix.variant == 'darwin-arm64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild -downloadComponent metalToolchain
+          xcrun --sdk macosx --find metal
+          xcrun --sdk macosx --find metallib
       - name: Build .lgx (${{ matrix.variant }})
         shell: bash
         env:

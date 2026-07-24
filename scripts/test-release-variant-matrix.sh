@@ -37,6 +37,11 @@ fi
 
 grep -Fq 'include: ${{ fromJson(needs.setup.outputs.build_matrix) }}' "$workflow"
 grep -Fq 'runs-on: ${{ matrix.runner }}' "$workflow"
+grep -Fq 'install_macos_metal_toolchain:' "$workflow"
+grep -Fq "if: inputs.install_macos_metal_toolchain && matrix.variant == 'darwin-arm64'" "$workflow"
+grep -Fq 'xcodebuild -downloadComponent metalToolchain' "$workflow"
+grep -Fq 'xcrun --sdk macosx --find metal' "$workflow"
+grep -Fq 'xcrun --sdk macosx --find metallib' "$workflow"
 if grep -Fq 'matrix.runs-on' "$workflow"; then
     printf 'workflow still uses a static runner include mapping\n' >&2
     exit 1

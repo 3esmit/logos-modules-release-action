@@ -106,6 +106,7 @@ jobs:
       require_all_variants: true
       dispatch_rebuild_index: false
       prerelease: true
+      install_macos_metal_toolchain: true
       signing_mode: none
 ```
 
@@ -121,6 +122,12 @@ independent catalog indexes their release assets.
 `prerelease` defaults to `false`. Set it to `true` when a package is being
 introduced through an alpha or beta GitHub Release while preserving the package
 version declared by its metadata.
+
+`install_macos_metal_toolchain` defaults to `false`. Set it to `true` only when
+the Apple-silicon build needs Xcode's optional Metal compiler, such as a RISC
+Zero dependency that compiles Metal kernels. The workflow installs and verifies
+the official toolchain before the macOS Nix build; it does not skip or reduce
+that platform's package.
 
 ### Idempotent releases (skip if already published)
 
