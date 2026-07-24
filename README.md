@@ -126,8 +126,9 @@ version declared by its metadata.
 `install_macos_metal_toolchain` defaults to `false`. Set it to `true` only when
 the Apple-silicon build needs Xcode's optional Metal compiler, such as a RISC
 Zero dependency that compiles Metal kernels. The workflow installs and verifies
-the official toolchain before the macOS Nix build; it does not skip or reduce
-that platform's package.
+the official toolchain before the macOS Nix build and disables Nix sandboxing
+for that one host-toolchain build. It does not skip or reduce that platform's
+package.
 
 ### Idempotent releases (skip if already published)
 

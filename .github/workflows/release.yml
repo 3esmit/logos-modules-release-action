@@ -349,13 +349,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          sudo xcode-select --switch /Applications/Xcode.app/Contents/Developer
           xcodebuild -downloadComponent metalToolchain
-          xcrun --sdk macosx --find metal
-          xcrun --sdk macosx --find metallib
+          env -u DEVELOPER_DIR -u SDKROOT xcrun --sdk macosx --find metal
+          env -u DEVELOPER_DIR -u SDKROOT xcrun --sdk macosx --find metallib
       - name: Build .lgx (${{ matrix.variant }})
         shell: bash
         env:
           BUILD_ATTR: ${{ needs.setup.outputs.build_attr }}
+          BUILD_VARIANT: ${{ matrix.variant }}
+          INSTALL_MACOS_METAL_TOOLCHAIN: ${{ inputs.install_macos_metal_toolchain }}
         run: |
           set -euo pipefail
           cd "${{ inputs.module_path }}"
@@ -367,7 +370,14 @@ jobs:
           # as "Not Available" / BuildFlavorMismatch. The portable
           # bundle is self-contained and uses the canonical variant
           # names that match what the package manager expects.
-          nix build ".#${BUILD_ATTR}" --print-out-paths --no-link > .lgx-out
+          nix_args=(build)
+          if [[ "$INSTALL_MACOS_METAL_TOOLCHAIN" == "true" && "$BUILD_VARIANT" == "darwin-arm64" ]]; then
+            # The module's Nix wrapper invokes Apple's host-installed Metal
+            # compiler. A sandboxed build cannot reach that toolchain.
+            nix_args+=(--option sandbox false)
+          fi
+          nix_args+=(".#${BUILD_ATTR}" --print-out-paths --no-link)
+          nix "${nix_args[@]}" > .lgx-out
           # The lgx build output is a single .lgx file in the result dir.
           out=$(cat .lgx-out)
           lgx=$(find "$out" -maxdepth 2 -name '*.lgx' | head -n1)

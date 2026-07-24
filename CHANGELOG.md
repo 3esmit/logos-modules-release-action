@@ -3,6 +3,7 @@
 ## 1.0.4 - Unreleased
 
 - Added opt-in Metal Toolchain preparation for Apple-silicon package builds.
+- Exposed the selected host Metal toolchain to opted-in Nix builds.
 
 ## 1.0.3 - Unreleased
 
