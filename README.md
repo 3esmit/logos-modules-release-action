@@ -11,7 +11,7 @@ cadence.
 
 For each module in your repo, the `release.yml` workflow:
 
-1. Reads `metadata.json` to pick up `name` and `version`.
+1. Reads selected metadata to pick up `name` and `version`.
 2. Builds the module's `.lgx` on a per-variant matrix (Linux + macOS by
    default). Supplying `variants` builds exactly those supported variants;
    unknown or duplicate names fail before a runner is allocated.
@@ -53,6 +53,30 @@ jobs:
 
 Repeat per module. Bumping the submodule pointer (and thereby its
 `metadata.json` `version`) is what triggers a new release.
+
+### Multiple packages from one source tree
+
+The default target is the source root's `metadata.json` and
+`lgx-portable` output. A source tree that intentionally exposes multiple
+packages can select a nested manifest and a different portable flake output:
+
+```yaml
+jobs:
+  release-core:
+    uses: logos-co/logos-modules-release-action/.github/workflows/release.yml@v1
+    with:
+      module_path: submodules/logos-inspector
+      metadata_path: core/metadata.json
+      build_attr: core-lgx-portable
+      variants: linux-amd64
+      signing_mode: none
+```
+
+Both inputs are validated before a build. `metadata_path` must be a relative
+JSON path below `module_path`, and `build_attr` must be a non-empty safe flake
+attribute. The resulting LGX manifest is still cross-checked against the
+selected metadata, so package identity, release tag, and sidecar remain tied
+to the built package rather than the source directory.
 
 ### Idempotent releases (skip if already published)
 

@@ -4,10 +4,11 @@ name: Release module
 # GitHub release plus a JSON sidecar that the rebuild-index workflow
 # aggregates into the rolling `index` release.
 #
-# Source of truth for the module's name+version is `<module_path>/metadata.json`.
-# There is intentionally no `module_name` / `version` input here; the action
-# extracts both from the built artifact via `lgx manifest --json` and
-# cross-checks them against `metadata.json` to fail loudly on drift.
+# Source of truth for the package's name+version is the selected metadata file
+# beneath `module_path`. There is intentionally no `module_name` / `version`
+# input here; the action extracts both from the built artifact via
+# `lgx manifest --json` and cross-checks them against that metadata to fail
+# loudly on drift.
 #
 # Signing is opt-in via `signing_mode`:
 #   - none      (default) — produce an unsigned `.lgx`.
@@ -26,6 +27,14 @@ on:
         description: "Path to the module source within the caller repo."
         type: string
         default: "."
+      metadata_path:
+        description: "Relative metadata.json path within module_path."
+        type: string
+        default: "metadata.json"
+      build_attr:
+        description: "Portable LGX flake output attribute to build."
+        type: string
+        default: "lgx-portable"
       variants:
         description: "Comma-separated list of variants to build."
         type: string
@@ -83,6 +92,8 @@ jobs:
     outputs:
       module_name:       ${{ steps.meta.outputs.module_name }}
       version:           ${{ steps.meta.outputs.version }}
+      metadata_path:     ${{ steps.target.outputs.metadata_path }}
+      build_attr:        ${{ steps.target.outputs.build_attr }}
       variants:          ${{ steps.meta.outputs.variants }}
       build_matrix:      ${{ steps.meta.outputs.build_matrix }}
       already_published: ${{ steps.published.outputs.already_published }}
@@ -126,11 +137,23 @@ jobs:
             # nested submodules it declares — skip every sibling.
             git submodule update --init --recursive -- "${MODULE_PATH}"
           fi
+      - id: target
+        name: Validate package target
+        shell: bash
+        env:
+          METADATA_PATH: ${{ inputs.metadata_path }}
+          BUILD_ATTR: ${{ inputs.build_attr }}
+        run: |
+          set -euo pipefail
+          target="$(scripts/release-target-inputs.sh "$METADATA_PATH" "$BUILD_ATTR")"
+          echo "metadata_path=$(jq -r .metadata_path <<<"$target")" >> "$GITHUB_OUTPUT"
+          echo "build_attr=$(jq -r .build_attr <<<"$target")" >> "$GITHUB_OUTPUT"
       - id: meta
         name: Read metadata.json
         shell: bash
         env:
           RELEASE_VARIANTS: ${{ inputs.variants }}
+          METADATA_PATH: ${{ steps.target.outputs.metadata_path }}
         run: |
           set -euo pipefail
 
@@ -153,11 +176,12 @@ jobs:
           fi
 
           mpath="${{ inputs.module_path }}"
-          if [[ ! -f "$mpath/metadata.json" ]]; then
-            echo "::error::no metadata.json at $mpath"; exit 1
+          metadata_file="$mpath/$METADATA_PATH"
+          if [[ ! -f "$metadata_file" ]]; then
+            echo "::error::no metadata.json at $metadata_file"; exit 1
           fi
-          name=$(jq -r '.name'    "$mpath/metadata.json")
-          ver=$(jq  -r '.version' "$mpath/metadata.json")
+          name=$(jq -r '.name'    "$metadata_file")
+          ver=$(jq  -r '.version' "$metadata_file")
           if [[ -z "$name" || "$name" == "null" ]]; then echo "::error::metadata.json missing name"; exit 1; fi
           if [[ -z "$ver"  || "$ver"  == "null" ]]; then echo "::error::metadata.json missing version"; exit 1; fi
           echo "module_name=$name" >> "$GITHUB_OUTPUT"
@@ -261,6 +285,8 @@ jobs:
             experimental-features = nix-command flakes
       - name: Build .lgx (${{ matrix.variant }})
         shell: bash
+        env:
+          BUILD_ATTR: ${{ needs.setup.outputs.build_attr }}
         run: |
           set -euo pipefail
           cd "${{ inputs.module_path }}"
@@ -272,7 +298,7 @@ jobs:
           # as "Not Available" / BuildFlavorMismatch. The portable
           # bundle is self-contained and uses the canonical variant
           # names that match what the package manager expects.
-          nix build .#lgx-portable --print-out-paths --no-link > .lgx-out
+          nix build ".#${BUILD_ATTR}" --print-out-paths --no-link > .lgx-out
           # The lgx build output is a single .lgx file in the result dir.
           out=$(cat .lgx-out)
           lgx=$(find "$out" -maxdepth 2 -name '*.lgx' | head -n1)
