@@ -44,4 +44,5 @@ assert_rejected 'core/metadata.json' 'core-lgx-portable;whoami'
 
 grep -Fq 'metadata_path:' "$workflow"
 grep -Fq 'build_attr:' "$workflow"
-grep -Fq 'nix build ".#${BUILD_ATTR}" --print-out-paths --no-link' "$workflow"
+grep -Fq 'nix_args+=(".#${BUILD_ATTR}" --print-out-paths --no-link)' "$workflow"
+grep -Fq 'nix "${nix_args[@]}" > .lgx-out' "$workflow"
