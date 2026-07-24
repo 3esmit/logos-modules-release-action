@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.4 - Unreleased
+
+- Added opt-in Metal Toolchain preparation for Apple-silicon package builds.
+
 ## 1.0.3 - Unreleased
 
 - Added self-contained helper checkout for reusable release workflows.
