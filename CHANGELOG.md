@@ -5,6 +5,7 @@
 - Added opt-in Metal Toolchain preparation for Apple-silicon package builds.
 - Exposed the selected host Metal toolchain to opted-in Nix builds.
 - Fixed sidecar generation when every requested release variant is present.
+- Fixed release-sidecar access to reusable-workflow helper scripts.
 
 ## 1.0.3 - Unreleased
 
