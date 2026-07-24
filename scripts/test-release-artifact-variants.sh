@@ -65,3 +65,30 @@ grep -Fq 'require_all_variants:' "$workflow"
 grep -Fq 'dispatch_rebuild_index:' "$workflow"
 grep -Fq 'prerelease:' "$workflow"
 grep -Fq "needs.build.result == 'success'" "$workflow"
+
+if ! awk '
+    /^  release:$/ {
+        in_release = 1
+        next
+    }
+    in_release && /^  [^ ]/ {
+        in_release = 0
+    }
+    in_release && /^    env:$/ {
+        in_job_env = 1
+        next
+    }
+    in_job_env && /^    [^ ]/ {
+        in_job_env = 0
+    }
+    in_job_env &&
+        $0 == "      RELEASE_ACTION_SCRIPTS: ${{ github.workspace }}/_release-action/scripts" {
+        found = 1
+    }
+    END {
+        exit !found
+    }
+' "$workflow"; then
+    printf 'release job does not expose reusable-workflow helpers to every step\n' >&2
+    exit 1
+fi

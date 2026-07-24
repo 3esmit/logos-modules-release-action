@@ -410,6 +410,12 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    env:
+      # Multiple release steps execute helpers from the exact reusable-
+      # workflow revision checked out below. Keep the path at job scope so a
+      # later helper consumer cannot accidentally inherit it only from a
+      # previous step (step environments do not persist).
+      RELEASE_ACTION_SCRIPTS: ${{ github.workspace }}/_release-action/scripts
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - name: Check out release workflow helpers
@@ -455,8 +461,6 @@ jobs:
       - name: Merge per-variant .lgx files
         id: merge
         shell: bash
-        env:
-          RELEASE_ACTION_SCRIPTS: ${{ github.workspace }}/_release-action/scripts
         run: |
           set -euo pipefail
           # `find` (not a shell glob) so an empty match yields zero
