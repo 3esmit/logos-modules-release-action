@@ -69,6 +69,13 @@ on:
           kernels (for example, RISC Zero).
         type: boolean
         default: false
+      reclaim_linux_disk_space:
+        description: >-
+          Reclaim unrelated preinstalled Android, .NET, and Haskell payloads
+          before a linux-amd64 build. Use for large Nix closures that exceed
+          the standard hosted runner's available disk.
+        type: boolean
+        default: false
       signing_mode:
         description: "One of: none, inline, external."
         type: string
@@ -327,6 +334,50 @@ jobs:
             git submodule update --init --recursive
           else
             git submodule update --init --recursive -- "${MODULE_PATH}"
+          fi
+      - name: Reclaim Linux runner disk for large package
+        if: inputs.reclaim_linux_disk_space && matrix.variant == 'linux-amd64'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          minimum_available_kib=$((20 * 1024 * 1024))
+          cleanup_paths=(
+            /usr/local/lib/android
+            /usr/share/dotnet
+            /opt/ghc
+            /usr/local/.ghcup
+          )
+
+          before_kib="$(df -Pk / | awk 'NR == 2 { print $4 }')"
+          echo "Disk before cleanup:"
+          df -h /
+
+          for path in "${cleanup_paths[@]}"; do
+            if [[ -e "$path" ]]; then
+              sudo du -sh -- "$path" || true
+            else
+              echo "Not present: $path"
+            fi
+          done
+
+          for path in "${cleanup_paths[@]}"; do
+            if [[ -e "$path" ]]; then
+              sudo rm -rf -- "$path"
+            fi
+          done
+          sudo apt-get clean
+
+          after_kib="$(df -Pk / | awk 'NR == 2 { print $4 }')"
+          reclaimed_kib=$((after_kib - before_kib))
+          echo "Disk after cleanup:"
+          df -h /
+          printf 'Reclaimed %d KiB; %d KiB available\n' \
+            "$reclaimed_kib" "$after_kib"
+
+          if ((after_kib < minimum_available_kib)); then
+            echo "::error::less than 20 GiB available after Linux runner cleanup"
+            exit 1
           fi
       # DeterminateSystems' installer rather than cachix/install-nix-action@v25,
       # which trips over the macos-latest runner's pre-provisioned _nixbld*

@@ -50,3 +50,6 @@ jobs:
 
       - name: Release artifact variants
         run: scripts/test-release-artifact-variants.sh
+
+      - name: Linux release disk reclamation contract
+        run: scripts/test-release-linux-disk-space.sh

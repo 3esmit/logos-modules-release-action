@@ -6,6 +6,7 @@
 - Exposed the selected host Metal toolchain to opted-in Nix builds.
 - Fixed sidecar generation when every requested release variant is present.
 - Fixed release-sidecar access to reusable-workflow helper scripts.
+- Added opt-in Linux runner disk reclamation for large Nix package builds.
 
 ## 1.0.3 - Unreleased
 
