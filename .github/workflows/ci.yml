@@ -40,3 +40,6 @@ jobs:
 
       - name: Release variant matrix
         run: scripts/test-release-variant-matrix.sh
+
+      - name: Release package target inputs
+        run: scripts/test-release-target-inputs.sh
