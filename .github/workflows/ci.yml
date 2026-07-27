@@ -51,5 +51,22 @@ jobs:
       - name: Release artifact variants
         run: scripts/test-release-artifact-variants.sh
 
+      - name: LGX tool source pin
+        run: scripts/test-lgx-tool-source-pin.sh
+
       - name: Linux release disk reclamation contract
         run: scripts/test-release-linux-disk-space.sh
+
+  lgx-tool-pin:
+    name: Pinned LGX tool
+    runs-on: ubuntu-latest
+    steps:
+      - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+        with:
+          extra-conf: |
+            experimental-features = nix-command flakes
+      - name: Build the reviewed LGX tool
+        shell: bash
+        run: |
+          set -euo pipefail
+          nix build 'github:logos-co/logos-package/8d4236f9453bce8b44dfd2f85a5006af993b7ed2#lgx' --no-link
