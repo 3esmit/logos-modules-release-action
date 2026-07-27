@@ -40,6 +40,10 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    env:
+      # Index rebuild publishes a release too. Use the same reviewed package
+      # CLI revision as release.yml instead of resolving a moving branch.
+      LGX_TOOL_FLAKE: github:logos-co/logos-package/8d4236f9453bce8b44dfd2f85a5006af993b7ed2#lgx
     steps:
       # Caller-repo checkout. Two reasons:
       #   1. softprops/action-gh-release is friendlier when invoked from
@@ -63,7 +67,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          nix build github:logos-co/logos-package#lgx --out-link "$RUNNER_TEMP/lgx-tool"
+          nix build "$LGX_TOOL_FLAKE" --out-link "$RUNNER_TEMP/lgx-tool"
           echo "$RUNNER_TEMP/lgx-tool/bin" >> "$GITHUB_PATH"
 
       # `index.py` lives in `logos-modules-release-tool`. Reusable

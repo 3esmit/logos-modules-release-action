@@ -467,6 +467,10 @@ jobs:
       # later helper consumer cannot accidentally inherit it only from a
       # previous step (step environments do not persist).
       RELEASE_ACTION_SCRIPTS: ${{ github.workspace }}/_release-action/scripts
+      # Keep the package CLI immutable too: this job publishes releases with
+      # contents-write permission, so it must not execute a moving upstream
+      # default branch. Advance this reviewed revision deliberately.
+      LGX_TOOL_FLAKE: github:logos-co/logos-package/8d4236f9453bce8b44dfd2f85a5006af993b7ed2#lgx
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - name: Check out release workflow helpers
@@ -488,8 +492,8 @@ jobs:
 
       # Bring `lgx` (from logos-co/logos-package) onto PATH so the
       # downstream merge / verify / sign / manifest steps can use a
-      # plain `lgx ...` invocation instead of repeating
-      # `nix run github:logos-co/logos-package#lgx --` four times.
+      # plain `lgx ...` invocation instead of repeatedly evaluating the
+      # reviewed pinned package flake.
       # `lgx` is NOT in nixpkgs (the previous `nix run nixpkgs#lgx`
       # was wrong and produced the "flake nixpkgs does not provide
       # attribute lgx" error).
@@ -497,7 +501,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          nix build github:logos-co/logos-package#lgx --out-link "$RUNNER_TEMP/lgx-tool"
+          nix build "$LGX_TOOL_FLAKE" --out-link "$RUNNER_TEMP/lgx-tool"
           echo "$RUNNER_TEMP/lgx-tool/bin" >> "$GITHUB_PATH"
 
       # Pattern must scope to THIS module only — the umbrella workflow
