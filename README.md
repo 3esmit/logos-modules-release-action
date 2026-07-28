@@ -126,9 +126,13 @@ version declared by its metadata.
 `install_macos_metal_toolchain` defaults to `false`. Set it to `true` only when
 the Apple-silicon build needs Xcode's optional Metal compiler, such as a RISC
 Zero dependency that compiles Metal kernels. The workflow installs and verifies
-the official toolchain before the macOS Nix build and disables Nix sandboxing
-for that one host-toolchain build. It does not skip or reduce that platform's
-package.
+the official toolchain before the macOS Nix build. It exports the verified
+absolute compiler paths as `LOGOS_MODULES_RELEASE_METAL` and
+`LOGOS_MODULES_RELEASE_METALLIB`, evaluates Nix with `--impure`, and disables
+Nix sandboxing for that one host-toolchain build. A caller that wraps `xcrun`
+must read those variables and invoke the supplied tools for `metal` and
+`metallib`; other `xcrun` calls should retain their normal behavior. The
+workflow does not skip or reduce that platform's package.
 
 ### Idempotent releases (skip if already published)
 

@@ -65,8 +65,10 @@ on:
       install_macos_metal_toolchain:
         description: >-
           Install Apple's optional Metal Toolchain before the darwin-arm64
-          build. Required by callers whose dependency graph compiles Metal
-          kernels (for example, RISC Zero).
+          build, then expose verified host compiler paths through
+          LOGOS_MODULES_RELEASE_METAL and LOGOS_MODULES_RELEASE_METALLIB.
+          Required by callers whose dependency graph compiles Metal kernels
+          (for example, RISC Zero).
         type: boolean
         default: false
       reclaim_linux_disk_space:
@@ -395,15 +397,29 @@ jobs:
       # Xcode 26 ships the Metal compiler as an optional component. Keep the
       # download opt-in: most modules do not need it, while RISC Zero callers
       # must build the real kernels instead of publishing a reduced artifact.
-      - name: Install macOS Metal Toolchain
+      - name: Install and verify macOS Metal Toolchain
         if: inputs.install_macos_metal_toolchain && matrix.variant == 'darwin-arm64'
         shell: bash
         run: |
           set -euo pipefail
-          sudo xcode-select --switch /Applications/Xcode.app/Contents/Developer
-          xcodebuild -downloadComponent metalToolchain
-          env -u DEVELOPER_DIR -u SDKROOT xcrun --sdk macosx --find metal
-          env -u DEVELOPER_DIR -u SDKROOT xcrun --sdk macosx --find metallib
+          xcode_developer=/Applications/Xcode.app/Contents/Developer
+          test -x "$xcode_developer/usr/bin/xcodebuild"
+          sudo xcode-select --switch "$xcode_developer"
+          test "$(xcode-select --print-path)" = "$xcode_developer"
+          env -u DEVELOPER_DIR -u SDKROOT xcodebuild -downloadComponent MetalToolchain
+          metal_path="$(env -u DEVELOPER_DIR -u SDKROOT xcrun_nocache=1 /usr/bin/xcrun --sdk macosx --find metal)"
+          metallib_path="$(env -u DEVELOPER_DIR -u SDKROOT xcrun_nocache=1 /usr/bin/xcrun --sdk macosx --find metallib)"
+          for tool_path in "$metal_path" "$metallib_path"; do
+            case "$tool_path" in
+              /*) test -x "$tool_path" ;;
+              *)
+                echo "Metal tool path is not absolute and executable: $tool_path" >&2
+                exit 1
+                ;;
+            esac
+          done
+          printf 'LOGOS_MODULES_RELEASE_METAL=%s\n' "$metal_path" >> "$GITHUB_ENV"
+          printf 'LOGOS_MODULES_RELEASE_METALLIB=%s\n' "$metallib_path" >> "$GITHUB_ENV"
       - name: Build .lgx (${{ matrix.variant }})
         shell: bash
         env:
@@ -424,8 +440,9 @@ jobs:
           nix_args=(build)
           if [[ "$INSTALL_MACOS_METAL_TOOLCHAIN" == "true" && "$BUILD_VARIANT" == "darwin-arm64" ]]; then
             # The module's Nix wrapper invokes Apple's host-installed Metal
-            # compiler. A sandboxed build cannot reach that toolchain.
-            nix_args+=(--option sandbox false)
+            # compiler. Pass the verified paths through impure evaluation;
+            # a sandboxed build cannot reach that host toolchain.
+            nix_args+=(--impure --option sandbox false)
           fi
           nix_args+=(".#${BUILD_ATTR}" --print-out-paths --no-link)
           nix "${nix_args[@]}" > .lgx-out
