@@ -39,11 +39,13 @@ grep -Fq 'include: ${{ fromJson(needs.setup.outputs.build_matrix) }}' "$workflow
 grep -Fq 'runs-on: ${{ matrix.runner }}' "$workflow"
 grep -Fq 'install_macos_metal_toolchain:' "$workflow"
 grep -Fq "if: inputs.install_macos_metal_toolchain && matrix.variant == 'darwin-arm64'" "$workflow"
-grep -Fq 'sudo xcode-select --switch /Applications/Xcode.app/Contents/Developer' "$workflow"
-grep -Fq 'xcodebuild -downloadComponent metalToolchain' "$workflow"
-grep -Fq 'env -u DEVELOPER_DIR -u SDKROOT xcrun --sdk macosx --find metal' "$workflow"
-grep -Fq 'env -u DEVELOPER_DIR -u SDKROOT xcrun --sdk macosx --find metallib' "$workflow"
-grep -Fq 'nix_args+=(--option sandbox false)' "$workflow"
+grep -Fq 'xcode_developer=/Applications/Xcode.app/Contents/Developer' "$workflow"
+grep -Fq 'env -u DEVELOPER_DIR -u SDKROOT xcodebuild -downloadComponent MetalToolchain' "$workflow"
+grep -Fq 'xcrun_nocache=1 /usr/bin/xcrun --sdk macosx --find metal' "$workflow"
+grep -Fq 'xcrun_nocache=1 /usr/bin/xcrun --sdk macosx --find metallib' "$workflow"
+grep -Fq "printf 'LOGOS_MODULES_RELEASE_METAL=%s\\n' \"\$metal_path\" >> \"\$GITHUB_ENV\"" "$workflow"
+grep -Fq "printf 'LOGOS_MODULES_RELEASE_METALLIB=%s\\n' \"\$metallib_path\" >> \"\$GITHUB_ENV\"" "$workflow"
+grep -Fq 'nix_args+=(--impure --option sandbox false)' "$workflow"
 if grep -Fq 'matrix.runs-on' "$workflow"; then
     printf 'workflow still uses a static runner include mapping\n' >&2
     exit 1
