@@ -276,6 +276,18 @@ jobs:
         with:
           extra-conf: |
             experimental-features = nix-command flakes
+      - name: Ensure Metal Toolchain
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if /usr/bin/xcrun metal --version >/dev/null 2>&1; then
+            echo "Metal Toolchain present"
+            exit 0
+          fi
+          echo "Metal Toolchain missing, downloading..."
+          xcodebuild -downloadComponent MetalToolchain
+          /usr/bin/xcrun metal --version
       - name: Build .lgx (${{ matrix.variant }})
         shell: bash
         run: |
