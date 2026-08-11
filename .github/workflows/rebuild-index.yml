@@ -117,9 +117,18 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 _tool/index.py build urls.txt -o index.json
+          # --icons-dir "" writes icon sidecars BESIDE index.json rather than
+          # into an icons/ subdirectory. Release assets are a flat namespace —
+          # a slash is not valid in an asset name — so the flat layout is what
+          # this transport requires. `icon.path` in the index is resolved
+          # relative to the index URL, so clients need no special handling.
+          python3 _tool/index.py build urls.txt -o index.json --icons-dir ""
           # Small at-a-glance summary in the workflow log.
           jq '{ schemaVersion, repositoryName, packageCount: (.packages | length) }' index.json
+          # find, not `ls | wc -l`: shellcheck SC2012/SC2035, and the
+          # ./ prefix keeps a filename that starts with a dash from being
+          # read as an option.
+          echo "icon sidecars: $(find . -maxdepth 1 -name '*.png' | wc -l)"
 
       - name: Replace the `index` release asset
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
@@ -127,6 +136,12 @@ jobs:
           tag_name: index
           name:     Catalog index (auto-updated)
           body:     "Auto-generated index of every per-module release in this repository."
-          files:    index.json
+          # Icons are content-addressed (<sha256>.png), so re-uploading an
+          # unchanged one is byte-identical and the action replaces in place.
+          # A glob is used rather than a list because the set changes as
+          # modules publish or update artwork.
+          files: |
+            index.json
+            *.png
           # `softprops/action-gh-release` updates existing releases with the
           # same tag, replacing assets in-place. No manual delete needed.
